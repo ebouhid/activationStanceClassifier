@@ -12,6 +12,6 @@ configs=(
 
 # Iterate through configs and process each one
 for config in "${configs[@]}"; do
-    python src/train_svc.py --config-name="$config"
+    python src/train_eval_svc.py --config-name="$config"
 done
 echo "All experiments completed."
