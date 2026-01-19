@@ -1,0 +1,31 @@
+data:
+  input_csv: "/files/datasets/political_leaning_texts/labeled_propositions.csv"
+  activations_file: "data/activations_bignews_all.csv"
+
+extraction:
+  batch_size: 8
+  layers: "all"
+  device: "cuda" # or "cpu"
+  max_length: 1024
+
+training:
+  test_size: 0.4
+  random_state: 42
+  kernel: "rbf"
+  image_file: "svc_decision_boundary.png"
+  class_weight: "balanced"
+
+feature_selection:
+  enabled: true
+  selectkbest_k: 1000  # Number of features to keep with SelectKBest (pre-filter before MRMR)
+  prefilter: "f_classif"
+  n_features: 50  # Number of features to select with MRMR
+  method_mrmr: "MIQ"   # MIQ (MID) or MID
+
+hydra:
+  run:
+    dir: runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+wandb:
+  project: "activation-bias-classifier"
+  run_name: "allLayers-bnews-50features"
