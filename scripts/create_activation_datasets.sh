@@ -5,6 +5,7 @@ mkdir -p data
 configs=( # We can use only a subset of configs to create activation datasets
     "allLayers_bnews_20features"
     "allLayers_bigDataset_20features"
+    "allLayers_andersonDataset_20features"
 )
 
 for config in "${configs[@]}"; do
