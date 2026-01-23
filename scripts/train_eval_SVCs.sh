@@ -8,6 +8,9 @@ configs=(
     "allLayers_bigDataset_20features"
     "allLayers_bigDataset_50features"
     "allLayers_bigDataset_100features"
+    "allLayers_andersonDataset_20features"
+    "allLayers_andersonDataset_50features"
+    "allLayers_andersonDataset_100features"
 )
 
 # Iterate through configs and process each one
