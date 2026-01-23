@@ -22,6 +22,19 @@ feature_selection:
   n_features: 50  # Number of features to select with MRMR
   method_mrmr: "MIQ"   # MIQ (MID) or MID
 
+likert:
+  questions_csv: "likert/questions_anderson.csv"
+  language: "pt" # or "en"
+  use_chat_format: true
+  max_new_tokens: 10
+  temperature: 0.0
+  experiment_name: null
+  # Activation intervention during generation
+  # Format: {layer_index: multiplier_value}
+  # Example: {15: 1.5} would amplify activations at layer 15 by 50%
+  # This allows studying how activation magnitudes affect political stance responses
+  activation_multipliers: null
+
 hydra:
   run:
     dir: runs/${now:%Y-%m-%d}/${now:%H-%M-%S}

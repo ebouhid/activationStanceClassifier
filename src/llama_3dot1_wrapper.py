@@ -1,6 +1,6 @@
 import torch
 from transformer_lens import HookedTransformer
-from typing import List, Union
+from typing import List, Union, Optional, Dict
 
 
 class Llama3dot1Wrapper:
@@ -36,7 +36,12 @@ class Llama3dot1Wrapper:
         # Store number of layers for 'all' option
         self.n_layers = self.model.cfg.n_layers
 
-    def get_layer_activations(self, tokens: torch.Tensor, layers: Union[List[int], str] = [19]) -> torch.Tensor:
+    def get_layer_activations(
+        self,
+        tokens: torch.Tensor,
+        layers: Union[List[int], str] = [19],
+        activation_multipliers: Optional[Dict[int, float]] = None
+    ) -> torch.Tensor:
         """
         Runs a forward pass and returns the residual stream (resid_pre) activations 
         for the specified layers, concatenated along the feature dimension.
@@ -45,6 +50,12 @@ class Llama3dot1Wrapper:
             tokens (torch.Tensor): A tensor of token IDs, shape [batch, seq_len].
             layers (Union[List[int], str]): List of layer indices to retrieve activations from,
                                             or 'all' to get activations from all layers.
+            activation_multipliers (Optional[Dict[int, float]]): Dictionary mapping layer indices
+                                                                  to multiplier values. If provided,
+                                                                  activations at those layers will be
+                                                                  multiplied by the corresponding factor
+                                                                  before propagating to subsequent layers.
+                                                                  Example: {10: 0.5, 15: 2.0}
 
         Returns:
             torch.Tensor: The concatenated activation tensor, shape [batch, seq_len, n_layers * d_model], 
@@ -65,25 +76,43 @@ class Llama3dot1Wrapper:
         if not layers:
             raise ValueError("layers list cannot be empty")
 
+        # Default to empty dict if no multipliers provided
+        if activation_multipliers is None:
+            activation_multipliers = {}
+
         # Dictionary to store the activations captured by hooks
         activations = {}
 
-        def make_layer_hook(layer_idx: int):
+        def make_layer_hook(layer_idx: int, multiplier: float = 1.0):
             def layer_hook(resid_pre: torch.Tensor, hook):
                 # resid_pre: [batch, seq, d_model] - This is the input to the attention/MLP block.
-                # We store a copy of the tensor for external use.
-                activations[layer_idx] = resid_pre.detach().clone().cpu()
-                return resid_pre
+                # Apply multiplier if not 1.0
+                if multiplier != 1.0:
+                    modified = resid_pre * multiplier
+                    # Store the modified activation
+                    activations[layer_idx] = modified.detach().clone().cpu()
+                    # Return modified tensor to propagate changes to subsequent layers
+                    return modified
+                else:
+                    # Store a copy of the tensor for external use
+                    activations[layer_idx] = resid_pre.detach().clone().cpu()
+                    return resid_pre
             return layer_hook
 
-        # Create hook points for all requested layers
-        fwd_hooks = []
-        for layer in layers:
-            hook_point = f"blocks.{layer}.hook_resid_pre"
-            fwd_hooks.append((hook_point, make_layer_hook(layer)))
+        # Determine all layers that need hooks (requested layers + intervention layers)
+        intervention_layers = set(activation_multipliers.keys())
+        all_hook_layers = set(layers) | intervention_layers
 
-        # Run the forward pass with hooks, stopping after the last requested layer
-        stop_at_layer = max(layers) + 1
+        # Create hook points for all needed layers
+        fwd_hooks = []
+        for layer in all_hook_layers:
+            hook_point = f"blocks.{layer}.hook_resid_pre"
+            multiplier = activation_multipliers.get(layer, 1.0)
+            fwd_hooks.append((hook_point, make_layer_hook(layer, multiplier)))
+
+        # Run the forward pass with hooks
+        # Need to run through at least the max layer we care about
+        stop_at_layer = max(max(layers), max(all_hook_layers)) + 1
 
         with torch.no_grad():
             self.model.run_with_hooks(
@@ -105,3 +134,93 @@ class Llama3dot1Wrapper:
         concatenated = torch.cat(layer_tensors, dim=-1)
 
         return concatenated
+
+    def generate_with_intervention(
+        self,
+        input_ids: torch.Tensor,
+        activation_multipliers: Optional[Dict[int, float]] = None,
+        max_new_tokens: int = 10,
+        temperature: Optional[float] = None,
+        do_sample: bool = False,
+        stop_at_eos: bool = True,
+        eos_token_id: Optional[int] = None,
+        verbose: bool = False,
+        **generate_kwargs
+    ) -> torch.Tensor:
+        """
+        Generates text with optional activation interventions applied during the forward pass.
+
+        This allows modifying the model's internal representations during generation,
+        which can be used to study how activation magnitudes affect model behavior.
+
+        Args:
+            input_ids (torch.Tensor): Input token IDs, shape [batch, seq_len].
+            activation_multipliers (Optional[Dict[int, float]]): Dictionary mapping layer indices
+                                                                  to multiplier values. Activations
+                                                                  at those layers will be scaled.
+                                                                  Example: {10: 0.5, 15: 2.0}
+            max_new_tokens (int): Maximum number of tokens to generate.
+            temperature (Optional[float]): Sampling temperature. If None, greedy decoding is used.
+            do_sample (bool): Whether to use sampling instead of greedy decoding.
+            stop_at_eos (bool): Whether to stop generation at EOS token.
+            eos_token_id (Optional[int]): EOS token ID to stop at. If None, uses tokenizer default.
+            verbose (bool): Whether to show generation progress.
+            **generate_kwargs: Additional arguments passed to model.generate().
+
+        Returns:
+            torch.Tensor: Generated token IDs including the input tokens.
+        """
+        # Use tokenizer's EOS token if not provided
+        if eos_token_id is None:
+            eos_token_id = self.model.tokenizer.eos_token_id
+
+        if activation_multipliers is None or len(activation_multipliers) == 0:
+            # No intervention, use standard generation
+            return self.model.generate(
+                input_ids.to(self.device),
+                max_new_tokens=max_new_tokens,
+                temperature=temperature if temperature is not None else 1.0,
+                do_sample=do_sample,
+                stop_at_eos=stop_at_eos,
+                eos_token_id=eos_token_id,
+                verbose=verbose,
+                **generate_kwargs
+            )
+
+        # Create intervention hooks
+        def make_intervention_hook(multiplier: float):
+            def hook(resid_pre: torch.Tensor, hook):
+                return resid_pre * multiplier
+            return hook
+
+        fwd_hooks = []
+        for layer, multiplier in activation_multipliers.items():
+            if multiplier != 1.0:
+                hook_point = f"blocks.{layer}.hook_resid_pre"
+                fwd_hooks.append(
+                    (hook_point, make_intervention_hook(multiplier)))
+
+        # Use run_with_hooks for generation with interventions
+        # Note: transformer_lens generate doesn't directly support hooks,
+        # so we need to use a workaround with add_hook
+        with torch.no_grad():
+            # Temporarily add hooks
+            for hook_point, hook_fn in fwd_hooks:
+                self.model.add_hook(hook_point, hook_fn)
+
+            try:
+                output_ids = self.model.generate(
+                    input_ids.to(self.device),
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature if temperature is not None else 1.0,
+                    do_sample=do_sample,
+                    stop_at_eos=stop_at_eos,
+                    eos_token_id=eos_token_id,
+                    verbose=verbose,
+                    **generate_kwargs
+                )
+            finally:
+                # Remove all hooks
+                self.model.reset_hooks()
+
+        return output_ids
