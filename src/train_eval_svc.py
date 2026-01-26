@@ -315,15 +315,17 @@ def main(cfg: DictConfig):
             f for fold_features in fold_selected_features for f in fold_features]
         feature_counts = Counter(all_selected)
         most_common = feature_counts.most_common()
-        logger.info(f"Most frequently selected features: {most_common}")
-        most_common_layers = pd.Series(
-            [f"layer_{int(f.split('-')[0].split('_')[1]) :02d}" for f, _ in most_common])
-        logger.info(
-            f"Most common layers in selected features:\n{most_common_layers.value_counts()}")
 
-        most_common_layers_pct = most_common_layers.value_counts() / most_common_layers.value_counts().sum() * 100
+        # Feature ranking
         logger.info(
-            f"Layer selection percentages:\n{most_common_layers_pct}")
+            f"\n--- Feature Ranking (by selection frequency across folds) ---")
+        feature_ranking_df = pd.DataFrame(
+            most_common, columns=['feature', 'selection_count'])
+        feature_ranking_df['selection_frequency'] = feature_ranking_df['selection_count'] / k_folds
+        feature_ranking_df['rank'] = range(1, len(feature_ranking_df) + 1)
+        feature_ranking_df = feature_ranking_df[[
+            'rank', 'feature', 'selection_count', 'selection_frequency']]
+        logger.info(f"\n{feature_ranking_df.to_string()}")
 
         # Use most frequently selected features for final model
         final_selected_features = [
@@ -453,22 +455,14 @@ def main(cfg: DictConfig):
             'n_final_selected_features': len(final_selected_features),
         })
 
-        # Layer frequency as a table for bar chart visualization
-        layer_data = [[layer, count]
-                      for layer, count in most_common_layers.value_counts().items()]
-        layer_table = wandb.Table(data=layer_data, columns=[
-                                  "layer", "selection_count"])
-        
-        layer_pct_data = [[layer, pct]
-                      for layer, pct in most_common_layers_pct.items()]
-        layer_pct_table = wandb.Table(data=layer_pct_data, columns=[
-                                  "layer", "selection_percentage"])
+        feature_ranking_table = wandb.Table(
+            dataframe=feature_ranking_df
+        )
 
         # Log all tables and images in one call
         wandb.log({
             'balanced_accuracy_table': accuracy_table,
-            'layer_selection_chart': layer_table,
-            'layer_selection_pct_chart': layer_pct_table,
+            'feature_ranking': feature_ranking_table,
             'cv_mean_classification_report': cv_report_table,
             'holdout_classification_report': holdout_table,
             'decision_boundary': wandb.Image(output_image_path),
