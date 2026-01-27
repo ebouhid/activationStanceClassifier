@@ -40,7 +40,7 @@ class Llama3dot1Wrapper:
         self,
         tokens: torch.Tensor,
         layers: Union[List[int], str] = [19],
-        activation_multipliers: Optional[Dict[int, float]] = None
+        activation_multipliers: Optional[Dict[str, float]] = None
     ) -> torch.Tensor:
         """
         Runs a forward pass and returns the residual stream (resid_pre) activations 
@@ -50,12 +50,13 @@ class Llama3dot1Wrapper:
             tokens (torch.Tensor): A tensor of token IDs, shape [batch, seq_len].
             layers (Union[List[int], str]): List of layer indices to retrieve activations from,
                                             or 'all' to get activations from all layers.
-            activation_multipliers (Optional[Dict[int, float]]): Dictionary mapping layer indices
-                                                                  to multiplier values. If provided,
-                                                                  activations at those layers will be
-                                                                  multiplied by the corresponding factor
-                                                                  before propagating to subsequent layers.
-                                                                  Example: {10: 0.5, 15: 2.0}
+            activation_multipliers (Optional[Dict[str, float]]): Dictionary mapping neuron identifiers
+                                                                  (format: 'layer_{L}-neuron_{N}') to 
+                                                                  multiplier values. If provided,
+                                                                  specific neurons will be multiplied by
+                                                                  the corresponding factor before propagating
+                                                                  to subsequent layers.
+                                                                  Example: {'layer_10-neuron_512': 0.5, 'layer_15-neuron_100': 2.0}
 
         Returns:
             torch.Tensor: The concatenated activation tensor, shape [batch, seq_len, n_layers * d_model], 
@@ -80,15 +81,30 @@ class Llama3dot1Wrapper:
         if activation_multipliers is None:
             activation_multipliers = {}
 
+        # Parse neuron-wise multipliers into per-layer dictionaries
+        # Format: {'layer_10-neuron_512': 0.5} -> {10: {512: 0.5}}
+        layer_neuron_multipliers = {}
+        for feature_name, multiplier in activation_multipliers.items():
+            # Parse 'layer_X-neuron_Y' format
+            parts = feature_name.split('-')
+            layer_idx = int(parts[0].split('_')[1])
+            neuron_idx = int(parts[1].split('_')[1])
+            if layer_idx not in layer_neuron_multipliers:
+                layer_neuron_multipliers[layer_idx] = {}
+            layer_neuron_multipliers[layer_idx][neuron_idx] = multiplier
+
         # Dictionary to store the activations captured by hooks
         activations = {}
 
-        def make_layer_hook(layer_idx: int, multiplier: float = 1.0):
+        def make_layer_hook(layer_idx: int, neuron_multipliers: Optional[Dict[int, float]] = None):
             def layer_hook(resid_pre: torch.Tensor, hook):
                 # resid_pre: [batch, seq, d_model] - This is the input to the attention/MLP block.
-                # Apply multiplier if not 1.0
-                if multiplier != 1.0:
-                    modified = resid_pre * multiplier
+                # Apply neuron-specific multipliers if provided
+                if neuron_multipliers:
+                    modified = resid_pre.clone()
+                    for neuron_idx, multiplier in neuron_multipliers.items():
+                        modified[:, :, neuron_idx] = modified[:,
+                                                              :, neuron_idx] * multiplier
                     # Store the modified activation
                     activations[layer_idx] = modified.detach().clone().cpu()
                     # Return modified tensor to propagate changes to subsequent layers
@@ -100,15 +116,16 @@ class Llama3dot1Wrapper:
             return layer_hook
 
         # Determine all layers that need hooks (requested layers + intervention layers)
-        intervention_layers = set(activation_multipliers.keys())
+        intervention_layers = set(layer_neuron_multipliers.keys())
         all_hook_layers = set(layers) | intervention_layers
 
         # Create hook points for all needed layers
         fwd_hooks = []
         for layer in all_hook_layers:
             hook_point = f"blocks.{layer}.hook_resid_pre"
-            multiplier = activation_multipliers.get(layer, 1.0)
-            fwd_hooks.append((hook_point, make_layer_hook(layer, multiplier)))
+            neuron_mults = layer_neuron_multipliers.get(layer, None)
+            fwd_hooks.append(
+                (hook_point, make_layer_hook(layer, neuron_mults)))
 
         # Run the forward pass with hooks
         # Need to run through at least the max layer we care about
@@ -138,7 +155,7 @@ class Llama3dot1Wrapper:
     def generate_with_intervention(
         self,
         input_ids: torch.Tensor,
-        activation_multipliers: Optional[Dict[int, float]] = None,
+        activation_multipliers: Optional[Dict[str, float]] = None,
         max_new_tokens: int = 10,
         temperature: Optional[float] = None,
         do_sample: bool = False,
@@ -155,10 +172,11 @@ class Llama3dot1Wrapper:
 
         Args:
             input_ids (torch.Tensor): Input token IDs, shape [batch, seq_len].
-            activation_multipliers (Optional[Dict[int, float]]): Dictionary mapping layer indices
-                                                                  to multiplier values. Activations
-                                                                  at those layers will be scaled.
-                                                                  Example: {10: 0.5, 15: 2.0}
+            activation_multipliers (Optional[Dict[str, float]]): Dictionary mapping neuron identifiers
+                                                                  (format: 'layer_{L}-neuron_{N}') to
+                                                                  multiplier values. Specific neurons
+                                                                  will be scaled by the given factor.
+                                                                  Example: {'layer_10-neuron_512': 0.5}
             max_new_tokens (int): Maximum number of tokens to generate.
             temperature (Optional[float]): Sampling temperature. If None, greedy decoding is used.
             do_sample (bool): Whether to use sampling instead of greedy decoding.
@@ -187,18 +205,32 @@ class Llama3dot1Wrapper:
                 **generate_kwargs
             )
 
-        # Create intervention hooks
-        def make_intervention_hook(multiplier: float):
+        # Parse neuron-wise multipliers into per-layer dictionaries
+        # Format: {'layer_10-neuron_512': 0.5} -> {10: {512: 0.5}}
+        layer_neuron_multipliers = {}
+        for feature_name, multiplier in activation_multipliers.items():
+            parts = feature_name.split('-')
+            layer_idx = int(parts[0].split('_')[1])
+            neuron_idx = int(parts[1].split('_')[1])
+            if layer_idx not in layer_neuron_multipliers:
+                layer_neuron_multipliers[layer_idx] = {}
+            layer_neuron_multipliers[layer_idx][neuron_idx] = multiplier
+
+        # Create intervention hooks for each layer with neuron-specific multipliers
+        def make_intervention_hook(neuron_multipliers: Dict[int, float]):
             def hook(resid_pre: torch.Tensor, hook):
-                return resid_pre * multiplier
+                modified = resid_pre.clone()
+                for neuron_idx, multiplier in neuron_multipliers.items():
+                    modified[:, :, neuron_idx] = modified[:,
+                                                          :, neuron_idx] * multiplier
+                return modified
             return hook
 
         fwd_hooks = []
-        for layer, multiplier in activation_multipliers.items():
-            if multiplier != 1.0:
-                hook_point = f"blocks.{layer}.hook_resid_pre"
-                fwd_hooks.append(
-                    (hook_point, make_intervention_hook(multiplier)))
+        for layer_idx, neuron_mults in layer_neuron_multipliers.items():
+            hook_point = f"blocks.{layer_idx}.hook_resid_pre"
+            fwd_hooks.append(
+                (hook_point, make_intervention_hook(neuron_mults)))
 
         # Use run_with_hooks for generation with interventions
         # Note: transformer_lens generate doesn't directly support hooks,

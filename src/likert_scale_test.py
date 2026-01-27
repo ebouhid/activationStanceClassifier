@@ -163,7 +163,7 @@ def run_likert_test(
     language: str = "pt",
     max_new_tokens: int = 10,
     temperature: float = 0.0,
-    activation_multipliers: Optional[Dict[int, float]] = None,
+    activation_multipliers: Optional[Dict[str, float]] = None,
     verbose: bool = True
 ) -> pd.DataFrame:
     """
@@ -175,7 +175,8 @@ def run_likert_test(
         language: Language for prompts
         max_new_tokens: Maximum tokens to generate
         temperature: Sampling temperature (0 for deterministic)
-        activation_multipliers: Optional dict mapping layer indices to multiplier values
+        activation_multipliers: Optional dict mapping neuron identifiers
+                                (format: 'layer_{L}-neuron_{N}') to multiplier values
                                 for activation intervention during generation
         verbose: Whether to show progress
 
@@ -479,8 +480,8 @@ def main(cfg: DictConfig):
         "likert", {}).get("activation_multipliers", None)
     activation_multipliers = None
     if activation_multipliers_cfg is not None:
-        # Convert OmegaConf to dict and ensure keys are integers
-        activation_multipliers = {int(k): float(
+        # Convert OmegaConf to dict, keys are neuron names (e.g., 'layer_14-neuron_512')
+        activation_multipliers = {str(k): float(
             v) for k, v in dict(activation_multipliers_cfg).items()}
         print(
             f"\nActivation intervention configured: {activation_multipliers}")
