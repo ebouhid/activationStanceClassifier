@@ -18,6 +18,8 @@ Scale: [-2, 2] where:
 
 import pandas as pd
 import torch
+import numpy as np
+from scipy.special import rel_entr
 from tqdm import tqdm
 from llama_3dot1_wrapper import Llama3dot1Wrapper
 import os
@@ -26,7 +28,7 @@ from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
 import json
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Generator
 import re
 
 
@@ -246,6 +248,154 @@ def run_likert_test(
             print(f"Prompt was:\n{prompt}\n---")
 
     return pd.DataFrame(results)
+
+
+def run_likert_test_streaming(
+    wrapper: Llama3dot1Wrapper,
+    questions_df: pd.DataFrame,
+    language: str = "pt",
+    max_new_tokens: int = 10,
+    temperature: float = 0.0,
+    activation_multipliers: Optional[Dict[str, float]] = None,
+    verbose: bool = True
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Streaming version of run_likert_test that yields pair results as they complete.
+
+    This enables intermediate reporting for Optuna pruning - each pair's PI
+    can be reported to allow early stopping of unpromising trials.
+
+    Args:
+        wrapper: The LLM wrapper instance
+        questions_df: DataFrame with questions (must have 'pergunta', 'pair_id', 'tipo_pergunta')
+        language: Language for prompts
+        max_new_tokens: Maximum tokens to generate
+        temperature: Sampling temperature (0 for deterministic)
+        activation_multipliers: Optional dict mapping neuron identifiers to multiplier values
+        verbose: Whether to show progress
+
+    Yields:
+        Dictionary with pair results including:
+        - pair_id: Pair identifier
+        - p_plus_score: Likert score for P+ statement
+        - p_minus_score: Likert score for P- statement
+        - polarization_index: PI for this pair (P+ - P-)
+        - valid: Whether both scores were parsed successfully
+    """
+    # Get unique pair IDs
+    pair_ids = sorted(questions_df['pair_id'].unique())
+
+    # Get EOS token ID
+    eos_token_id = wrapper.model.tokenizer.eos_token_id
+
+    iterator = tqdm(pair_ids, desc="Processing pairs") if verbose else pair_ids
+
+    for pair_id in iterator:
+        pair_data = questions_df[questions_df['pair_id'] == pair_id]
+
+        pair_result = {
+            'pair_id': int(pair_id),
+            'p_plus_score': None,
+            'p_minus_score': None,
+            'p_plus_raw': None,
+            'p_minus_raw': None,
+            'polarization_index': None,
+            'valid': False
+        }
+
+        # Process P+ and P- questions for this pair
+        for _, row in pair_data.iterrows():
+            statement = row['pergunta']
+            tipo = row['tipo_pergunta']
+
+            # Create and format prompt
+            user_message = create_likert_prompt(statement, language)
+            prompt = format_chat_prompt(
+                wrapper.model.tokenizer, user_message, language)
+
+            # Tokenize
+            input_ids = wrapper.model.tokenizer(
+                prompt,
+                return_tensors='pt',
+                truncation=True,
+                max_length=1024
+            )['input_ids'].to(wrapper.device)
+
+            # Generate response
+            with torch.no_grad():
+                output_ids = wrapper.generate_with_intervention(
+                    input_ids,
+                    activation_multipliers=activation_multipliers,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature if temperature > 0 else None,
+                    do_sample=temperature > 0,
+                    stop_at_eos=True,
+                    eos_token_id=eos_token_id,
+                    verbose=False
+                )
+
+            # Decode response
+            new_tokens = output_ids[0, input_ids.shape[1]:]
+            response_text = wrapper.model.tokenizer.decode(
+                new_tokens, skip_special_tokens=True)
+
+            # Parse Likert score
+            likert_value = parse_likert_response(response_text, language)
+
+            # Store based on question type
+            if tipo == 'P+':
+                pair_result['p_plus_score'] = likert_value
+                pair_result['p_plus_raw'] = response_text
+            elif tipo == 'P-':
+                pair_result['p_minus_score'] = likert_value
+                pair_result['p_minus_raw'] = response_text
+
+        # Compute pair PI if both scores valid
+        if (pair_result['p_plus_score'] is not None and
+                pair_result['p_minus_score'] is not None):
+            pair_result['polarization_index'] = (
+                pair_result['p_plus_score'] - pair_result['p_minus_score']
+            )
+            pair_result['valid'] = True
+
+        yield pair_result
+
+
+def compute_kl_divergence(
+    baseline_scores: List[int],
+    intervention_scores: List[int],
+    smoothing: float = 1e-10
+) -> float:
+    """
+    Computes KL divergence between baseline and intervention Likert score distributions.
+
+    Uses add-epsilon smoothing to avoid division by zero for sparse distributions.
+
+    Args:
+        baseline_scores: List of Likert scores from baseline (no intervention)
+        intervention_scores: List of Likert scores from intervention run
+        smoothing: Small value added to avoid log(0)
+
+    Returns:
+        KL divergence D_KL(intervention || baseline)
+        Lower values indicate intervention preserves baseline distribution.
+    """
+    # Define Likert bins
+    bins = [-2, -1, 0, 1, 2]
+
+    # Count occurrences (with smoothing)
+    def scores_to_distribution(scores: List[int]) -> np.ndarray:
+        counts = np.array([scores.count(b) for b in bins], dtype=np.float64)
+        counts += smoothing  # Add smoothing
+        return counts / counts.sum()  # Normalize to probability
+
+    p_baseline = scores_to_distribution(baseline_scores)
+    p_intervention = scores_to_distribution(intervention_scores)
+
+    # Compute KL divergence: sum(p_intervention * log(p_intervention / p_baseline))
+    kl_div = np.sum(rel_entr(p_intervention, p_baseline))
+
+    return float(kl_div)
 
 
 def compute_polarization_index(results_df: pd.DataFrame) -> Dict[str, Any]:

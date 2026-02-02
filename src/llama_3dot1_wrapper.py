@@ -1,6 +1,7 @@
 import torch
+import torch.nn.functional as F
 from transformer_lens import HookedTransformer
-from typing import List, Union, Optional, Dict
+from typing import List, Union, Optional, Dict, Tuple
 
 
 class Llama3dot1Wrapper:
@@ -256,3 +257,124 @@ class Llama3dot1Wrapper:
                 self.model.reset_hooks()
 
         return output_ids
+
+    def get_stance_token_ids(self, language: str = "pt") -> Tuple[int, int]:
+        """
+        Gets the token IDs for positive (Agree) and negative (Disagree) stance words.
+
+        Note: Llama 3 tokenizer is space-sensitive. The first token of a response
+        typically includes a leading space.
+
+        Args:
+            language: Language code ("pt" for Portuguese, "en" for English)
+
+        Returns:
+            Tuple of (positive_token_id, negative_token_id)
+        """
+        if language == "pt":
+            # Portuguese: " Concordo" (Agree) and " Discordo" (Disagree)
+            positive_word = "Con"
+            negative_word = "Dis"
+        else:
+            # English: " Agree" and " Disagree"
+            positive_word = " Agree"
+            negative_word = " Disagree"
+
+        # Encode and take the first token ID (the word itself)
+        positive_tokens = self.model.tokenizer.encode(
+            positive_word, add_special_tokens=False)
+        negative_tokens = self.model.tokenizer.encode(
+            negative_word, add_special_tokens=False)
+
+        # The first token should be the stance word
+        positive_token_id = positive_tokens[0]
+        negative_token_id = negative_tokens[0]
+
+        return positive_token_id, negative_token_id
+
+    def get_soft_stance_score(
+        self,
+        input_ids: torch.Tensor,
+        activation_multipliers: Optional[Dict[str, float]] = None,
+        positive_token_id: Optional[int] = None,
+        negative_token_id: Optional[int] = None,
+        language: str = "pt"
+    ) -> float:
+        """
+        Computes a continuous score [-1, 1] representing the probability gap 
+        between positive (Agree) and negative (Disagree) tokens at the last position.
+
+        This uses a single forward pass (no generation) for efficient optimization.
+
+        Args:
+            input_ids: Input token IDs, shape [batch, seq_len] or [seq_len]
+            activation_multipliers: Optional dict mapping neuron identifiers
+                                    (format: 'layer_{L}-neuron_{N}') to multiplier values
+            positive_token_id: Token ID for positive stance word. If None, uses language default.
+            negative_token_id: Token ID for negative stance word. If None, uses language default.
+            language: Language code for default token IDs ("pt" or "en")
+
+        Returns:
+            Float in range [-1, 1]: prob(positive) - prob(negative)
+            Positive values indicate agreement tendency, negative indicates disagreement.
+        """
+        # Get default token IDs if not provided
+        if positive_token_id is None or negative_token_id is None:
+            pos_id, neg_id = self.get_stance_token_ids(language)
+            positive_token_id = positive_token_id or pos_id
+            negative_token_id = negative_token_id or neg_id
+
+        # Ensure input_ids has batch dimension
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+
+        input_ids = input_ids.to(self.device)
+
+        # Default to empty dict if no multipliers provided
+        if activation_multipliers is None or len(activation_multipliers) == 0:
+            # No intervention - simple forward pass
+            with torch.no_grad():
+                logits = self.model(input_ids)  # [batch, seq_len, vocab_size]
+        else:
+            # Parse neuron-wise multipliers into per-layer dictionaries
+            layer_neuron_multipliers = {}
+            for feature_name, multiplier in activation_multipliers.items():
+                parts = feature_name.split('-')
+                layer_idx = int(parts[0].split('_')[1])
+                neuron_idx = int(parts[1].split('_')[1])
+                if layer_idx not in layer_neuron_multipliers:
+                    layer_neuron_multipliers[layer_idx] = {}
+                layer_neuron_multipliers[layer_idx][neuron_idx] = multiplier
+
+            # Create intervention hooks
+            def make_intervention_hook(neuron_multipliers: Dict[int, float]):
+                def hook(resid_pre: torch.Tensor, hook):
+                    modified = resid_pre.clone()
+                    for neuron_idx, multiplier in neuron_multipliers.items():
+                        modified[:, :, neuron_idx] = modified[:,
+                                                              :, neuron_idx] * multiplier
+                    return modified
+                return hook
+
+            fwd_hooks = []
+            for layer_idx, neuron_mults in layer_neuron_multipliers.items():
+                hook_point = f"blocks.{layer_idx}.hook_resid_pre"
+                fwd_hooks.append(
+                    (hook_point, make_intervention_hook(neuron_mults)))
+
+            # Forward pass with hooks
+            with torch.no_grad():
+                logits = self.model.run_with_hooks(
+                    input_ids, fwd_hooks=fwd_hooks)
+
+        # Extract logits for the FINAL token position
+        last_token_logits = logits[0, -1, :]  # [vocab_size]
+
+        # Apply softmax to get probabilities
+        probs = F.softmax(last_token_logits, dim=-1)
+
+        # Compute probability difference
+        prob_positive = probs[positive_token_id].item()
+        prob_negative = probs[negative_token_id].item()
+
+        return prob_positive - prob_negative

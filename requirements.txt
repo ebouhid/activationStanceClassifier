@@ -10,3 +10,5 @@ mrmr-selection>=0.2.8
 matplotlib>=3.8
 wandb>=0.16
 pyarrow>=14.0
+scipy>=1.11
+optuna>=3.0
