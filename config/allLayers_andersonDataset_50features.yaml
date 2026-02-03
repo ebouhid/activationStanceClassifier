@@ -1,5 +1,5 @@
 data:
-  input_csv: "/files/datasets/political_leaning_texts/anderson_propositions.csv"
+  input_csv: "/files/datasets/political_leaning_texts/anderson_propositions_cured.csv"
   activations_file: "data/activations_andersonDataset_all.csv"
 
 extraction:
@@ -27,5 +27,5 @@ hydra:
     dir: runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
 wandb:
-  project: "activation-bias-classifier"
+  project: "activation-bias-classifier-thin"
   run_name: "allLayers-andersonDataset-50features"
