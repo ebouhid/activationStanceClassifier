@@ -647,6 +647,7 @@ def main(cfg: DictConfig):
         study_name = opt_cfg.study_name
         storage = opt_cfg.get('storage', None)
         load_if_exists = opt_cfg.get('load_if_exists', True)
+        n_startup_trials = opt_cfg.get('n_startup_trials', 10)
 
         fast_mode = opt_cfg.get('fast_mode', False)
         fast_n_pairs = opt_cfg.get('fast_n_pairs', 10)
@@ -728,7 +729,8 @@ def main(cfg: DictConfig):
         # Create sampler (TPE works well for optimization)
         sampler = TPESampler(
             seed=cfg.get('random_state', 42),
-            multivariate=True
+            multivariate=True,
+            n_startup_trials=n_startup_trials
         )
 
         # Resolve storage path if provided
