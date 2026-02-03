@@ -232,8 +232,9 @@ def soft_objective(
     # Calculate average SIGNED soft PI
     avg_signed_pi = total_signed_score / valid_pairs
 
-    # Return ABSOLUTE VALUE to maximize polarization magnitude in either direction
-    # This allows optimizer to find extreme left OR extreme right, whichever is easier
+    if np.isnan(avg_signed_pi) or np.isinf(avg_signed_pi):
+        return 0.0
+    
     return abs(avg_signed_pi)
 
 
