@@ -4,6 +4,7 @@ from matplotlib.projections.polar import PolarAxes
 import json
 from math import pi
 from pathlib import Path
+from scipy import stats
 
 import matplotlib
 
@@ -57,8 +58,17 @@ def create_boxplot_comparison(baseline_pis, intervened_pis, output_dir):
     baseline_std = baseline_pis.std()
     intervened_std = intervened_pis.std()
 
+    # Perform Wilcoxon Signed-Rank Test
+    wilcoxon_stat, wilcoxon_pvalue = stats.wilcoxon(
+        baseline_pis, intervened_pis)
+    effect_size = (intervened_mean - baseline_mean) / \
+        baseline_std if baseline_std != 0 else float('inf')
+
     stats_text = f"Baseline: μ={baseline_mean:.3f}, σ={baseline_std:.3f}\n"
-    stats_text += f"Intervened: μ={intervened_mean:.3f}, σ={intervened_std:.3f}"
+    stats_text += f"Intervened: μ={intervened_mean:.3f}, σ={intervened_std:.3f}\n"
+    stats_text += f"Wilcoxon: p={wilcoxon_pvalue:.4f} (stat={wilcoxon_stat:.3f})\n"
+    stats_text += f"Effect Size (Rank-Biserial r): {effect_size:.3f}"
+
     ax.text(0.98, 0.02, stats_text, transform=ax.transAxes,
             fontsize=10, verticalalignment='bottom', horizontalalignment='right',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
@@ -72,8 +82,82 @@ def create_boxplot_comparison(baseline_pis, intervened_pis, output_dir):
         'baseline_mean': baseline_mean,
         'baseline_std': baseline_std,
         'intervened_mean': intervened_mean,
-        'intervened_std': intervened_std
+        'intervened_std': intervened_std,
+        'wilcoxon_statistic': float(wilcoxon_stat),
+        'wilcoxon_pvalue': float(wilcoxon_pvalue)
     }
+
+
+def create_parallel_coordinates_plot(baseline_pis, intervened_pis, output_dir):
+    """Creates a parallel coordinates plot showing shift from baseline to intervened."""
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    n_questions = len(baseline_pis)
+
+    # Determine color based on direction and magnitude of change
+    changes = intervened_pis - baseline_pis
+
+    # Normalize colors based on change magnitude
+    max_change = max(abs(changes.min()), abs(changes.max()))
+
+    for i in range(n_questions):
+        change = changes[i]
+        if change < 0:
+            # color = plt.cm.Reds(min(abs(change) / max_change, 1.0))
+            color = 'red'
+        else:
+            # color = plt.cm.Blues(min(abs(change) / max_change, 1.0))
+            color = 'blue'
+
+        ax.plot([0, 1], [baseline_pis[i], intervened_pis[i]],
+                color=color, alpha=0.4, linewidth=0.8)
+
+    # Add vertical axes
+    ax.axvline(0, color='black', linewidth=2, label='Baseline')
+    ax.axvline(1, color='black', linewidth=2, label='Intervened')
+
+    # Add horizontal zero line
+    ax.axhline(0, color='gray', linewidth=1, linestyle='--', alpha=0.5)
+
+    # Customize plot
+    ax.set_xlim(-0.1, 1.1)
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(['Baseline', 'Intervened'], fontsize=12)
+    ax.set_ylabel('Polarization Index (PI)', fontsize=12)
+    ax.set_title('Question-Level PI Shift: Baseline → Intervened', fontsize=14)
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+
+    # Add summary statistics
+    baseline_mean = baseline_pis.mean()
+    intervened_mean = intervened_pis.mean()
+    mean_shift = intervened_mean - baseline_mean
+
+    # Draw mean lines
+    ax.plot([0, 1], [baseline_mean, intervened_mean],
+            color='black', linewidth=3, linestyle='-', label='Mean', zorder=10)
+
+    # Add legend with color explanation
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='red', alpha=0.6, label='Leftward shift'),
+        Patch(facecolor='blue', alpha=0.6, label='Rightward shift'),
+        plt.Line2D([0], [0], color='black', linewidth=3, label='Mean PI')
+    ]
+    ax.legend(handles=legend_elements, loc='upper left', fontsize=10)
+
+    # Add text box with statistics
+    stats_text = f"Mean shift: {mean_shift:.3f}\n"
+    stats_text += f"Questions: {n_questions}"
+    ax.text(0.98, 0.98, stats_text, transform=ax.transAxes,
+            fontsize=10, verticalalignment='top', horizontalalignment='right',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
+
+    fig.tight_layout()
+    parallel_path = output_dir / "pi_shift_parallel.png"
+    fig.savefig(parallel_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return parallel_path
 
 
 def create_radar_chart(categories, baseline_vals, intervened_vals, title):
@@ -182,6 +266,7 @@ def main():
     # 6. Plot 3: Question-Level PI Boxplot (if CSV files provided)
     boxplot_path = None
     boxplot_stats = None
+    parallel_path = None
     if FILE_BASELINE_PIS and FILE_INTERVENED_PIS:
         baseline_df, intervened_df = load_question_pis(
             FILE_BASELINE_PIS, FILE_INTERVENED_PIS)
@@ -194,6 +279,18 @@ def main():
             f"Baseline - Mean: {boxplot_stats['baseline_mean']:.3f}, Std: {boxplot_stats['baseline_std']:.3f}")
         print(
             f"Intervened - Mean: {boxplot_stats['intervened_mean']:.3f}, Std: {boxplot_stats['intervened_std']:.3f}")
+        print(f"\nWilcoxon Signed-Rank Test:")
+        print(f"Statistic: {boxplot_stats['wilcoxon_statistic']:.4f}")
+        print(f"P-value: {boxplot_stats['wilcoxon_pvalue']:.4f}")
+        if boxplot_stats['wilcoxon_pvalue'] < 0.05:
+            print("Result: Statistically significant difference (p < 0.05)")
+        else:
+            print("Result: No statistically significant difference (p >= 0.05)")
+
+        # 7. Plot 4: Parallel Coordinates Plot
+        parallel_path = create_parallel_coordinates_plot(
+            baseline_pis, intervened_pis, output_dir)
+        print(f"\nParallel coordinates plot saved to: {parallel_path}")
 
     df_axes.to_csv(output_dir / "pi_shift_axes.csv")
     summary = {
@@ -210,12 +307,15 @@ def main():
             "radar": str(fig1_path),
             "fluidity": str(fig2_path),
             "boxplot": str(boxplot_path),
+            "parallel": str(parallel_path) if parallel_path else None,
             "axes_csv": str(output_dir / "pi_shift_axes.csv"),
         },
     }
     if boxplot_path:
         summary["artifacts"]["boxplot"] = str(boxplot_path)
         summary["question_level_stats"] = boxplot_stats
+    if parallel_path:
+        summary["artifacts"]["parallel"] = str(parallel_path)
 
     with open(output_dir / "pi_shift_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
