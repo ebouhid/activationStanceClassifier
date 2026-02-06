@@ -134,7 +134,8 @@ def soft_objective(
     bounds: Tuple[float, float],
     positive_token_id: int,
     negative_token_id: int,
-    language: str = "pt"
+    language: str = "pt",
+    use_absolute: bool = False
 ) -> float:
     """
     Soft objective function using logit differences instead of discrete PI.
@@ -143,17 +144,10 @@ def soft_objective(
     the probability gap between "Agree" and "Disagree" tokens at the first
     response position.
 
-    IMPORTANT: Returns the ABSOLUTE VALUE of the average signed soft PI.
-    This allows the optimizer to find extreme polarization in EITHER direction
-    (left-wing OR right-wing), following whichever gradient is steepest.
-
     The soft metric for each pair is:
         pair_diff = soft_score(P+) - soft_score(P-)
 
     where soft_score = P("Concordo") - P("Discordo") at the first token position.
-
-    We sum signed pair_diffs first (ensuring ideological consistency), then
-    apply abs() only at the end to maximize polarization magnitude.
 
     Args:
         trial: Optuna trial object
@@ -164,9 +158,10 @@ def soft_objective(
         positive_token_id: Token ID for positive stance word ("Concordo"/"Agree")
         negative_token_id: Token ID for negative stance word ("Discordo"/"Disagree")
         language: Prompt language
+        use_absolute: If True, return abs(avg_signed_pi) instead of the signed value
 
     Returns:
-        Absolute value of average soft PI (higher = more polarization in either direction)
+        Average soft PI (signed or absolute depending on use_absolute)
     """
     # Build multipliers from trial suggestions
     multipliers = build_multipliers_from_trial(trial, target_neurons, bounds)
@@ -234,8 +229,10 @@ def soft_objective(
 
     if np.isnan(avg_signed_pi) or np.isinf(avg_signed_pi):
         return 0.0
-    
-    return abs(avg_signed_pi)
+
+    if use_absolute:
+        return abs(avg_signed_pi)
+    return avg_signed_pi
 
 
 def objective(
@@ -514,32 +511,41 @@ def print_pareto_front(study: optuna.Study, baseline_pi: float):
     print("\n" + "=" * 70)
 
 
-def print_best_soft_trial(study: optuna.Study, baseline_soft_score: float):
+def print_best_soft_trial(
+    study: optuna.Study,
+    baseline_soft_score: float,
+    objective_mode: str = "absolute",
+    direction: str = "maximize"
+):
     """
     Prints the best trial for soft metric single-objective optimization.
 
-    Note: The objective returns abs(signed_pi), so the "value" is the magnitude.
-    The actual direction (left/right polarization) needs to be re-computed
-    or inferred from the sign of the baseline vs final discrete PI.
-
     Args:
         study: Completed Optuna study
-        baseline_soft_score: Baseline soft score (absolute) for comparison
+        baseline_soft_score: Baseline soft score for comparison
+        objective_mode: 'signed' or 'absolute'
+        direction: 'maximize' or 'minimize'
     """
+    mode_label = f"{direction.upper()} / {objective_mode.upper()}"
     print("\n" + "=" * 70)
-    print("BEST SOFT METRIC SOLUTION (ABSOLUTE POLARIZATION)")
+    print(f"BEST SOFT METRIC SOLUTION ({mode_label})")
     print("=" * 70)
-    print(f"Baseline |Soft Score|: {baseline_soft_score:.6f}")
+
+    score_label = "|Soft Score|" if objective_mode == "absolute" else "Signed Soft Score"
+    print(f"Baseline {score_label}: {baseline_soft_score:.6f}")
     print("-" * 70)
 
     best_trial = study.best_trial
-    abs_soft_score = best_trial.value  # This is abs(signed_pi)
-    delta = abs_soft_score - baseline_soft_score
+    best_value = best_trial.value
+    delta = best_value - baseline_soft_score
 
     print(f"\nBest Trial #{best_trial.number}:")
-    print(f"  |Soft Score| (Polarization Magnitude): {abs_soft_score:.6f}")
+    print(f"  {score_label}: {best_value:.6f}")
     print(f"  Δ from baseline: {delta:+.6f}")
-    print(f"  Note: Direction (left/right) determined by final validation")
+    if objective_mode == "absolute":
+        print(f"  Note: Direction (left/right) determined by final validation")
+    else:
+        print(f"  Note: Signed value — positive=right-leaning, negative=left-leaning")
     print(f"  Multipliers:")
     for neuron, mult in best_trial.params.items():
         print(f"    {neuron}: {mult:.4f}")
@@ -652,6 +658,19 @@ def main(cfg: DictConfig):
         fast_mode = opt_cfg.get('fast_mode', False)
         fast_n_pairs = opt_cfg.get('fast_n_pairs', 10)
 
+        # Objective configuration
+        objective_mode = opt_cfg.get(
+            'objective_mode', 'signed')  # 'signed' or 'absolute'
+        # 'maximize' or 'minimize'
+        direction = opt_cfg.get('direction', 'maximize')
+        use_absolute = objective_mode == 'absolute'
+
+        # Validate configuration
+        assert objective_mode in ('signed', 'absolute'), \
+            f"Invalid objective_mode '{objective_mode}'. Must be 'signed' or 'absolute'."
+        assert direction in ('maximize', 'minimize'), \
+            f"Invalid direction '{direction}'. Must be 'maximize' or 'minimize'."
+
         # Language setting
         language = likert_cfg.get('language', 'pt')
 
@@ -659,7 +678,12 @@ def main(cfg: DictConfig):
         print("NEURON INTERVENTION OPTIMIZATION (SOFT METRIC)")
         print("=" * 70)
         print(f"\nOptimization Mode: Soft Metric (logit difference)")
-        print(f"  - Objective: Maximize P('Concordo') - P('Discordo') gap")
+        print(f"  - Objective mode: {objective_mode}")
+        print(f"  - Direction: {direction}")
+        if use_absolute:
+            print(f"  - Returns |soft PI| → polarization magnitude")
+        else:
+            print(f"  - Returns signed soft PI → preserves polarization direction")
         print(f"  - This provides continuous gradient for the optimizer")
         print(f"\nTarget neurons ({len(target_neurons)}):")
         for n in target_neurons:
@@ -741,17 +765,17 @@ def main(cfg: DictConfig):
             os.makedirs(os.path.dirname(
                 storage.replace('sqlite:///', '')), exist_ok=True)
 
-        # Create or load study - SINGLE OBJECTIVE (maximize |soft_score|)
+        # Create or load study - SINGLE OBJECTIVE
         study = optuna.create_study(
             study_name=study_name,
             storage=storage,
-            # Maximize abs(soft_score) = polarization magnitude
-            direction="maximize",
+            direction=direction,
             sampler=sampler,
             load_if_exists=load_if_exists
         )
 
         print(f"\nStarting soft metric optimization ({n_trials} trials)...")
+        print(f"  objective_mode={objective_mode}, direction={direction}")
         print("-" * 70)
 
         # Run optimization with soft objective
@@ -764,14 +788,17 @@ def main(cfg: DictConfig):
                 bounds=bounds,
                 positive_token_id=positive_token_id,
                 negative_token_id=negative_token_id,
-                language=language
+                language=language,
+                use_absolute=use_absolute
             ),
             n_trials=n_trials,
             show_progress_bar=True
         )
 
         # Print results
-        print_best_soft_trial(study, baseline_abs_soft)
+        baseline_ref = baseline_abs_soft if use_absolute else baseline_signed_soft
+        print_best_soft_trial(
+            study, baseline_ref, objective_mode=objective_mode, direction=direction)
 
         # Save results
         config_dict = OmegaConf.to_container(cfg, resolve=True)
@@ -780,7 +807,7 @@ def main(cfg: DictConfig):
             output_dir=output_dir,
             baseline_pi=baseline_pi,
             config=config_dict,
-            baseline_soft_score=baseline_abs_soft,
+            baseline_soft_score=baseline_ref,
             use_soft_metric=True
         )
 
@@ -793,7 +820,8 @@ def main(cfg: DictConfig):
         print("=" * 70)
 
         best_trial = study.best_trial
-        print("\nBest soft metric solution (maximizes |polarization|):")
+        mode_label = f"{direction}s {'|soft PI|' if use_absolute else 'signed soft PI'}"
+        print(f"\nBest soft metric solution ({mode_label}):")
         print("activation_multipliers: {")
         for neuron, mult in best_trial.params.items():
             print(f'  "{neuron}": {mult:.4f},')
@@ -804,8 +832,11 @@ def main(cfg: DictConfig):
         print("NEXT STEPS")
         print("=" * 70)
         print("The soft metric optimization is complete.")
-        print("The optimizer maximized |polarization| - direction may be left OR right.")
-        print("To validate the real-world PI and determine direction, run likert_scale_test.py")
+        if use_absolute:
+            print("The optimizer used |soft PI| - direction may be left OR right.")
+        else:
+            print(f"The optimizer {direction}d the signed soft PI.")
+        print("To validate the real-world PI, run likert_scale_test.py")
         print("with the best multipliers from above.")
 
     return study

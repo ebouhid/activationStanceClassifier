@@ -103,15 +103,24 @@ optimization:
   bounds: [-6.0, 6.0]
   
   n_startup_trials: 100
-  n_trials: 1000
+  n_trials: 2000
+  # Objective mode: "signed" returns raw signed soft PI, "absolute" returns abs(soft PI)
+  # "signed" preserves polarization direction; "absolute" maximizes polarization magnitude
+  objective_mode: "signed"
+
+  # Optimization direction: "maximize" or "minimize"
+  # e.g. maximize signed → right-wing shift; minimize signed → left-wing shift
+  # e.g. maximize absolute → max polarization regardless of direction
+  direction: "maximize"
+
   # Study name for tracking/resuming
-  study_name: "pi_maximization-4Groups-soft"
+  study_name: "pi_maximization-4Groups-soft-signed-run2"
   
   # SQLite storage for resumability (relative to workspace)
   # Set to null for in-memory (non-resumable)
   storage: "sqlite:///runs/optuna_persist/pi_optimization.db"
   
-  load_if_exists: false
+  load_if_exists: true
   
   fast_mode: false
   fast_n_pairs: 10
