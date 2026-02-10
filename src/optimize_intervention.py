@@ -1,5 +1,5 @@
 import optuna
-from optuna.samplers import TPESampler
+from optuna.samplers import TPESampler, CmaEsSampler
 import pandas as pd
 import torch
 import numpy as np
@@ -632,7 +632,7 @@ def compute_baseline_soft_score(
 @hydra.main(version_base=None, config_path="../config", config_name="optimize_intervention")
 def main(cfg: DictConfig):
     """
-    Main function to run Bayesian optimization for neuron interventions.
+    Main function to run optimization (TPE/CMA-ES) for neuron interventions.
 
     Uses soft metric (logit difference) optimization for continuous gradient signal.
     """
@@ -750,12 +750,24 @@ def main(cfg: DictConfig):
             language=language
         )
 
-        # Create sampler (TPE works well for optimization)
-        sampler = TPESampler(
-            seed=cfg.get('random_state', 42),
-            multivariate=True,
-            n_startup_trials=n_startup_trials
-        )
+        # Create sampler based on config
+        sampler_type = opt_cfg.get('sampler', 'tpe').lower()
+
+        if sampler_type == 'cmaes':
+            print(
+                f"Using CmaEsSampler (seed={cfg.get('random_state', 42)})...")
+            sampler = CmaEsSampler(
+                seed=cfg.get('random_state', 42),
+                n_startup_trials=n_startup_trials
+            )
+        else:
+            # Default to TPE
+            print(f"Using TPESampler (seed={cfg.get('random_state', 42)})...")
+            sampler = TPESampler(
+                seed=cfg.get('random_state', 42),
+                multivariate=True,
+                n_startup_trials=n_startup_trials
+            )
 
         # Resolve storage path if provided
         if storage:
