@@ -23,6 +23,7 @@ import sys
 import json
 import torch
 import logging
+import wandb
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Iterable
 from pathlib import Path
@@ -300,6 +301,8 @@ def run_poeta_evaluation(
     limit: Optional[int] = None,
     output_path: Optional[str] = None,
     description_dict_path: Optional[str] = None,
+    log_to_wandb: bool = False,
+    wandb_prefix: str = "",
 ) -> Dict[str, Any]:
     """
     Run PoETa V2 benchmark evaluation on a Llama model with optional interventions.
@@ -316,6 +319,8 @@ def run_poeta_evaluation(
         limit: Limit number of examples per task (for testing)
         output_path: Path to save results JSON
         description_dict_path: Path to task description JSON
+        log_to_wandb: Whether to log results to wandb
+        wandb_prefix: Prefix for wandb metric names
 
     Returns:
         Dictionary containing evaluation results
@@ -425,11 +430,64 @@ def run_poeta_evaluation(
             json.dump(serializable_results, f, indent=2)
         print(f"\nResults saved to: {abs_output_path}")
 
+        if 'outputs' in serializable_results:
+            outputs_path = abs_output_path.parent / \
+                f"{abs_output_path.stem}_outputs.json"
+            with open(outputs_path, 'w') as f:
+                json.dump(serializable_results['outputs'], f, indent=2)
+            print(f"Outputs saved to: {outputs_path}")
+
     # Print summary table
     print("\n" + "="*60)
     print("RESULTS SUMMARY")
     print("="*60)
     print(evaluator.make_table(results))
+
+    # Log to wandb if requested
+    if log_to_wandb and wandb.run is not None:
+        wandb_metrics = {}
+        table_rows = []
+
+        # Log evaluation results
+        for task_name, task_metrics in results.get('results', {}).items():
+            if isinstance(task_metrics, dict):
+                for key, value in task_metrics.items():
+                    # Handle nested prompt_mode structure (e.g. "dynamic-random": {"acc": 1.0})
+                    if isinstance(value, dict):
+                        for metric, val in value.items():
+                            if isinstance(val, (int, float)):
+                                wandb_metrics[f"{wandb_prefix}{task_name}/{metric}"] = val
+                                table_rows.append(
+                                    [task_name, key, metric, val])
+                    # Handle direct metric structure
+                    elif isinstance(value, (int, float)):
+                        wandb_metrics[f"{wandb_prefix}{task_name}/{key}"] = value
+                        table_rows.append([task_name, "default", key, value])
+
+        # Create and add table
+        if table_rows:
+            table = wandb.Table(
+                columns=["Task", "Prompt Mode", "Metric", "Value"], data=table_rows)
+            wandb_metrics[f"{wandb_prefix}results_table"] = table
+
+        # Log outputs table
+        if 'outputs' in results:
+            output_rows = []
+            for task_name, task_outputs in results['outputs'].items():
+                for prompt_mode, doc_outputs in task_outputs.items():
+                    for doc_id, preds in doc_outputs.items():
+                        pred_str = str(preds)
+                        if isinstance(preds, list) and len(preds) == 1:
+                            pred_str = str(preds[0])
+                        output_rows.append(
+                            [task_name, prompt_mode, str(doc_id), pred_str])
+
+            if output_rows:
+                out_table = wandb.Table(
+                    columns=["Task", "Prompt Mode", "Doc ID", "Prediction"], data=output_rows)
+                wandb_metrics[f"{wandb_prefix}model_outputs"] = out_table
+
+        wandb.log(wandb_metrics)
 
     return serializable_results
 
@@ -442,6 +500,7 @@ def compare_baseline_vs_intervened(
     limit: Optional[int] = None,
     output_dir: str = "runs",
     save_logs: bool = True,
+    log_to_wandb: bool = False,
 ) -> Dict[str, Any]:
     """
     Run PoETa evaluation on both baseline and intervened models, then compare.
@@ -454,6 +513,7 @@ def compare_baseline_vs_intervened(
         limit: Example limit per task
         output_dir: Base directory to save results (will create runs/date/poeta_time/)
         save_logs: Whether to save terminal output to log files
+        log_to_wandb: Whether to log results to wandb
 
     Returns:
         Dictionary with 'baseline', 'intervened', and 'comparison' results
@@ -480,6 +540,8 @@ def compare_baseline_vs_intervened(
             limit=limit,
             output_path=str(run_dir / "baseline_results.json"),
             description_dict_path="description.json",
+            log_to_wandb=log_to_wandb,
+            wandb_prefix="baseline/",
         )
 
         # Run intervened
@@ -494,6 +556,8 @@ def compare_baseline_vs_intervened(
             limit=limit,
             output_path=str(run_dir / "intervened_results.json"),
             description_dict_path="description.json",
+            log_to_wandb=log_to_wandb,
+            wandb_prefix="intervened/",
         )
 
         # Compute comparison
@@ -515,6 +579,25 @@ def compare_baseline_vs_intervened(
 
         if 'overall' in comparison:
             print(f"\nOverall change: {comparison['overall']:+.4f}")
+
+        # Log comparison to wandb
+        if log_to_wandb and wandb.run is not None:
+            comparison_metrics = {}
+            if 'overall' in comparison:
+                comparison_metrics["delta/overall_change"] = comparison['overall']
+
+            table_rows = []
+            for task, metrics in comparison.get('per_task', {}).items():
+                for metric, delta in metrics.items():
+                    comparison_metrics[f"delta/{task}/{metric}"] = delta
+                    table_rows.append([task, metric, delta])
+
+            if table_rows:
+                table = wandb.Table(
+                    columns=["Task", "Metric", "Delta"], data=table_rows)
+                comparison_metrics["delta/comparison_table"] = table
+
+            wandb.log(comparison_metrics)
 
         return baseline_results, intervened_results, comparison
 
@@ -565,13 +648,26 @@ def compute_comparison(
     for task in baseline_results:
         if task in intervened_results:
             comparison['per_task'][task] = {}
-            for metric in baseline_results[task]:
-                if metric in intervened_results[task]:
-                    base_val = baseline_results[task][metric]
-                    int_val = intervened_results[task][metric]
-                    if isinstance(base_val, (int, float)) and isinstance(int_val, (int, float)):
+
+            # Iterate through keys which might be metrics or prompt_modes
+            for key, base_val in baseline_results[task].items():
+                if key in intervened_results[task]:
+                    int_val = intervened_results[task][key]
+
+                    # Case 1: Nested dictionary (Prompt Mode)
+                    if isinstance(base_val, dict) and isinstance(int_val, dict):
+                        for metric, b_v in base_val.items():
+                            if metric in int_val:
+                                i_v = int_val[metric]
+                                if isinstance(b_v, (int, float)) and isinstance(i_v, (int, float)):
+                                    delta = i_v - b_v
+                                    comparison['per_task'][task][metric] = delta
+                                    deltas.append(delta)
+
+                    # Case 2: Direct value (Metric)
+                    elif isinstance(base_val, (int, float)) and isinstance(int_val, (int, float)):
                         delta = int_val - base_val
-                        comparison['per_task'][task][metric] = delta
+                        comparison['per_task'][task][key] = delta
                         deltas.append(delta)
 
     if deltas:
@@ -600,6 +696,21 @@ def main(cfg: DictConfig):
 
     print(OmegaConf.to_yaml(cfg))
 
+    wandb_cfg = cfg.get('wandb', {})
+    if wandb_cfg is None:
+        wandb_cfg = {}
+
+    log_to_wandb = wandb_cfg.get('log_to_wandb', False)
+
+    if log_to_wandb:
+        wandb.init(
+            project=wandb_cfg.get('project', 'poeta-evaluation'),
+            entity=wandb_cfg.get('entity', None),
+            name=wandb_cfg.get('run_name', None),
+            tags=list(wandb_cfg.get('tags', [])),
+            config=OmegaConf.to_container(cfg, resolve=True)
+        )
+
     # Convert OmegaConf to dict for activation_multipliers
     activation_multipliers = None
     if cfg.get('activation_multipliers'):
@@ -626,6 +737,7 @@ def main(cfg: DictConfig):
             limit=cfg.get('limit'),
             output_dir=cfg.get('output_dir', 'runs'),
             save_logs=cfg.get('save_logs', True),
+            log_to_wandb=log_to_wandb,
         )
     else:
         # Run single evaluation - follow convention: runs/date/poeta_time/
@@ -649,6 +761,7 @@ def main(cfg: DictConfig):
                 output_path=output_path,
                 description_dict_path=cfg.get(
                     'description_dict_path', 'description.json'),
+                log_to_wandb=log_to_wandb,
             )
 
         if cfg.get('save_logs', True):
