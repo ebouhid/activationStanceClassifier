@@ -97,6 +97,9 @@ class Llama3dot1Wrapper:
         # Dictionary to store the activations captured by hooks
         activations = {}
 
+        # get_layer_activations operates on a fixed input (no generation),
+        # so all positions are "prompt" positions. We apply multipliers to all
+        # positions here, which is correct and consistent with get_soft_stance_score.
         def make_layer_hook(layer_idx: int, neuron_multipliers: Optional[Dict[int, float]] = None):
             def layer_hook(resid_pre: torch.Tensor, hook):
                 # resid_pre: [batch, seq, d_model] - This is the input to the attention/MLP block.
@@ -217,13 +220,22 @@ class Llama3dot1Wrapper:
                 layer_neuron_multipliers[layer_idx] = {}
             layer_neuron_multipliers[layer_idx][neuron_idx] = multiplier
 
-        # Create intervention hooks for each layer with neuron-specific multipliers
+        # Create intervention hooks that ONLY modify prompt positions.
+        # During autoregressive generation, TransformerLens recomputes the full
+        # sequence at each step (no KV cache). If we modify ALL positions,
+        # generated tokens get their activations distorted on every subsequent
+        # step, compounding artifacts and producing nonsense.
+        # By restricting to prompt positions, the generated tokens' residual
+        # streams remain unmodified, and the steering effect propagates
+        # naturally through attention from the modified prompt.
+        prompt_len = input_ids.shape[-1]
+
         def make_intervention_hook(neuron_multipliers: Dict[int, float]):
             def hook(resid_pre: torch.Tensor, hook):
                 modified = resid_pre.clone()
                 for neuron_idx, multiplier in neuron_multipliers.items():
-                    modified[:, :, neuron_idx] = modified[:,
-                                                          :, neuron_idx] * multiplier
+                    modified[:, :prompt_len, neuron_idx] = modified[
+                        :, :prompt_len, neuron_idx] * multiplier
                 return modified
             return hook
 
@@ -299,7 +311,7 @@ class Llama3dot1Wrapper:
         positive_token_id: Optional[int] = None,
         negative_token_id: Optional[int] = None,
         language: str = "pt"
-    ) -> float:
+    ) -> Tuple[float, float]:
         """
         Computes a continuous score [-1, 1] representing the probability gap 
         between positive (Agree) and negative (Disagree) tokens at the last position.
@@ -315,8 +327,11 @@ class Llama3dot1Wrapper:
             language: Language code for default token IDs ("pt" or "en")
 
         Returns:
-            Float in range [-1, 1]: prob(positive) - prob(negative)
-            Positive values indicate agreement tendency, negative indicates disagreement.
+            Tuple of (score, prob_sum):
+                - score: Float in range [-1, 1]: prob(positive) - prob(negative)
+                         Positive values indicate agreement tendency, negative indicates disagreement.
+                - prob_sum: Float representing prob(positive) + prob(negative)
+                            Used to validate that the model is producing realistic Likert responses.
         """
         # Get default token IDs if not provided
         if positive_token_id is None or negative_token_id is None:
@@ -373,8 +388,11 @@ class Llama3dot1Wrapper:
         # Apply softmax to get probabilities
         probs = F.softmax(last_token_logits, dim=-1)
 
-        # Compute probability difference
+        # Compute probability difference and sum
         prob_positive = probs[positive_token_id].item()
         prob_negative = probs[negative_token_id].item()
 
-        return prob_positive - prob_negative
+        score = prob_positive - prob_negative
+        prob_sum = prob_positive + prob_negative
+
+        return score, prob_sum
