@@ -95,6 +95,9 @@ class OutputLogger:
         # Restore original streams
         sys.stdout = self.original_stdout
         sys.stderr = self.original_stderr
+        if self.tee_stdout is None or self.tee_stderr is None:
+            raise RuntimeError(
+                "TeeOutput instances were not properly initialized")
         self.tee_stdout.close()
         self.tee_stderr.close()
         return False
@@ -135,7 +138,8 @@ def soft_objective(
     positive_token_id: int,
     negative_token_id: int,
     language: str = "pt",
-    use_absolute: bool = False
+    use_absolute: bool = False,
+    direction: str = "maximize"
 ) -> float:
     """
     Soft objective function using logit differences instead of discrete PI.
@@ -159,6 +163,7 @@ def soft_objective(
         negative_token_id: Token ID for negative stance word ("Discordo"/"Disagree")
         language: Prompt language
         use_absolute: If True, return abs(avg_signed_pi) instead of the signed value
+        direction: Optimization direction ('maximize' or 'minimize')
 
     Returns:
         Average soft PI (signed or absolute depending on use_absolute)
@@ -190,15 +195,24 @@ def soft_objective(
                 wrapper.model.tokenizer, user_message, language)
 
             # Tokenize
-            input_ids = wrapper.model.tokenizer(
+            if wrapper.model.tokenizer is None:
+                raise RuntimeError(
+                    "Tokenizer is not initialized in the model wrapper")
+
+            tokenized = wrapper.model.tokenizer(
                 prompt,
                 return_tensors='pt',
                 truncation=True,
                 max_length=1024
-            )['input_ids']
+            )
+            input_ids = tokenized['input_ids']
 
             # Get soft stance score (single forward pass, no generation)
-            soft_score = wrapper.get_soft_stance_score(
+            if not isinstance(input_ids, torch.Tensor):
+                raise TypeError(
+                    f"Expected input_ids to be torch.Tensor, got {type(input_ids).__name__}")
+
+            soft_score, prob_sum = wrapper.get_soft_stance_score(
                 input_ids=input_ids,
                 activation_multipliers=multipliers,
                 positive_token_id=positive_token_id,
@@ -395,7 +409,7 @@ def save_optimization_results(
     study: optuna.Study,
     output_dir: str,
     baseline_pi: float,
-    config: Dict[str, Any],
+    config: Dict[Any, Any],
     baseline_soft_score: Optional[float] = None,
     use_soft_metric: bool = False
 ) -> str:
@@ -536,7 +550,8 @@ def print_best_soft_trial(
     print("-" * 70)
 
     best_trial = study.best_trial
-    best_value = best_trial.value
+    best_value = best_trial.value if best_trial.value is not None else float(
+        'nan')
     delta = best_value - baseline_soft_score
 
     print(f"\nBest Trial #{best_trial.number}:")
@@ -595,14 +610,23 @@ def compute_baseline_soft_score(
             prompt = format_chat_prompt(
                 wrapper.model.tokenizer, user_message, language)
 
-            input_ids = wrapper.model.tokenizer(
+            if wrapper.model.tokenizer is None:
+                raise RuntimeError(
+                    "Tokenizer is not initialized in the model wrapper")
+
+            tokenized = wrapper.model.tokenizer(
                 prompt,
                 return_tensors='pt',
                 truncation=True,
                 max_length=1024
-            )['input_ids']
+            )
+            input_ids = tokenized['input_ids']
 
-            soft_score = wrapper.get_soft_stance_score(
+            if not isinstance(input_ids, torch.Tensor):
+                raise TypeError(
+                    f"Expected input_ids to be torch.Tensor, got {type(input_ids).__name__}")
+
+            soft_score, _ = wrapper.get_soft_stance_score(
                 input_ids=input_ids,
                 activation_multipliers=None,
                 positive_token_id=positive_token_id,
@@ -727,6 +751,10 @@ def main(cfg: DictConfig):
         print(f"  Negative ('Discordo'/'Disagree'): {negative_token_id}")
 
         # Verify tokens decode correctly
+        if wrapper.model.tokenizer is None:
+            raise RuntimeError(
+                "Tokenizer is not initialized in the model wrapper")
+
         pos_decoded = wrapper.model.tokenizer.decode([positive_token_id])
         neg_decoded = wrapper.model.tokenizer.decode([negative_token_id])
         print(f"  Positive decodes to: '{pos_decoded}'")
@@ -801,7 +829,7 @@ def main(cfg: DictConfig):
                 positive_token_id=positive_token_id,
                 negative_token_id=negative_token_id,
                 language=language,
-                use_absolute=use_absolute
+                use_absolute=use_absolute,
             ),
             n_trials=n_trials,
             show_progress_bar=True
@@ -814,6 +842,10 @@ def main(cfg: DictConfig):
 
         # Save results
         config_dict = OmegaConf.to_container(cfg, resolve=True)
+        if not isinstance(config_dict, dict):
+            raise TypeError(
+                f"Expected config_dict to be dict, got {type(config_dict).__name__}")
+
         results_path = save_optimization_results(
             study=study,
             output_dir=output_dir,
