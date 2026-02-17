@@ -285,13 +285,13 @@ class Llama3dot1Wrapper:
             Tuple of (positive_token_id, negative_token_id)
         """
         if language == "pt":
-            # Portuguese: " Concordo" (Agree) and " Discordo" (Disagree)
+            # Portuguese: "Concordo" (Agree) and "Discordo" (Disagree)
             positive_word = "Con"
             negative_word = "Dis"
         else:
-            # English: " Agree" and " Disagree"
-            positive_word = " Agree"
-            negative_word = " Disagree"
+            # English: "Agree" and "Disagree"
+            positive_word = "Agree"
+            negative_word = "Disagree"
 
         # Encode and take the first token ID (the word itself)
         positive_tokens = self.model.tokenizer.encode(
