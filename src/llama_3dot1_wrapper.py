@@ -228,7 +228,8 @@ class Llama3dot1Wrapper:
         # By restricting to prompt positions, the generated tokens' residual
         # streams remain unmodified, and the steering effect propagates
         # naturally through attention from the modified prompt.
-        prompt_len = input_ids.shape[-1]
+        buffer_size = 3
+        prompt_len = max(0, input_ids.shape[-1] - buffer_size)
 
         def make_intervention_hook(neuron_multipliers: Dict[int, float]):
             def hook(resid_pre: torch.Tensor, hook):
