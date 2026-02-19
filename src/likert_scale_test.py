@@ -41,6 +41,14 @@ LIKERT_SCALE = {
     2: "Concordo totalmente"
 }
 
+LIKERT_SCALE_ALT = {
+    -2: "Discordo totalmente",
+    -1: "Discordo",
+    0: "Neutro",
+    1: "Concordo",
+    2: "Concordo totalmente"
+}
+
 LIKERT_SCALE_EN = {
     -2: "Strongly disagree",
     -1: "Somewhat disagree",
@@ -124,6 +132,7 @@ def parse_likert_response(response: str, language: str) -> Optional[int]:
     """
     # Clean the response
     response = response.strip()
+    response = response.strip('\n.')
 
     # Remove leading dashes/bullets and whitespace
     response = re.sub(r'^[\s\-\*•]+', '', response)
@@ -138,7 +147,7 @@ def parse_likert_response(response: str, language: str) -> Optional[int]:
     response = response.strip()
 
     # Get the appropriate scale based on language
-    scale = LIKERT_SCALE if language == "pt" else LIKERT_SCALE_EN
+    scale = LIKERT_SCALE_ALT if language == "pt" else LIKERT_SCALE_EN
 
     # First try exact match (case-insensitive)
     response_lower = response.lower()
