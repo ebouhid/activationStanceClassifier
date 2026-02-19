@@ -12,16 +12,15 @@ matplotlib.use("Agg")
 # import numpy as np
 
 # --- Configuration ---
-FILE_BASELINE = "runs/2026-02-03/10-47-56/metrics_20260203_104851.json"
-FILE_INTERVENED = "runs/2026-02-02/14-44-47/metrics_20260202_144539.json"
-FILE_BASELINE_PIS = "runs/2026-02-03/10-47-56/pair_results_20260203_104851.csv"
-FILE_INTERVENED_PIS = "runs/2026-02-02/14-44-47/pair_results_20260202_144539.csv"
+FILE_BASELINE = "runs/2026-02-19/13-21-10/metrics_20260219_132154.json"
+FILE_INTERVENED = "runs/2026-02-18/21-50-56/metrics_20260218_215142.json"
+FILE_BASELINE_PIS = "runs/2026-02-19/13-21-10/pair_results_20260219_132154.csv"
+FILE_INTERVENED_PIS = "runs/2026-02-18/21-50-56/pair_results_20260218_215142.csv"
 
 
 def load_and_identify(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    # Heuristic: The one with larger absolute PI is the Intervention
     pi = data['model_polarization_index']
     return data, pi
 
@@ -205,14 +204,17 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Load Data
-    data1, pi1 = load_and_identify(FILE_BASELINE)
-    data2, pi2 = load_and_identify(FILE_INTERVENED)
+    baseline, baseline_pi = load_and_identify(FILE_BASELINE)
+    intervened, intervened_pi = load_and_identify(FILE_INTERVENED)
 
-    # Identify which is which
-    if abs(pi1) > abs(pi2):
-        intervened, baseline = data1, data2
-    else:
-        intervened, baseline = data2, data1
+    # Keep labels tied to the provided file paths to avoid silent inversion.
+    # If this warning appears, double-check that FILE_BASELINE/FILE_INTERVENED
+    # point to the intended runs.
+    if abs(baseline_pi) > abs(intervened_pi):
+        print(
+            "Warning: |Baseline PI| > |Intervened PI|. "
+            "Keeping file-based labels as provided."
+        )
 
     print(f"Baseline PI: {baseline['model_polarization_index']:.3f}")
     print(f"Intervened PI: {intervened['model_polarization_index']:.3f}")
