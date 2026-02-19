@@ -21,14 +21,14 @@ import torch
 import numpy as np
 from scipy.special import rel_entr
 from tqdm import tqdm
-from llama_3dot1_wrapper import Llama3dot1Wrapper
+from model_factory import get_model_wrapper
 import os
 import hydra
 from omegaconf import DictConfig
 from hydra.core.hydra_config import HydraConfig
 import json
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Generator
+from typing import Optional, Dict, Any, List, Generator, Union
 import re
 
 
@@ -160,7 +160,7 @@ def parse_likert_response(response: str, language: str) -> Optional[int]:
 
 
 def run_likert_test(
-    wrapper: Llama3dot1Wrapper,
+    wrapper,  # Llama3dot1Wrapper or Gemma3Wrapper
     questions_df: pd.DataFrame,
     language: str = "pt",
     max_new_tokens: int = 10,
@@ -251,7 +251,7 @@ def run_likert_test(
 
 
 def run_likert_test_streaming(
-    wrapper: Llama3dot1Wrapper,
+    wrapper,  # Llama3dot1Wrapper or Gemma3Wrapper
     questions_df: pd.DataFrame,
     language: str = "pt",
     max_new_tokens: int = 10,
@@ -619,11 +619,10 @@ def main(cfg: DictConfig):
         print("\nQuestions by type:")
         print(questions_df['tipo_pergunta'].value_counts())
 
-    # Initialize model
-    device = cfg.extraction.device if torch.cuda.is_available(
-    ) and cfg.extraction.device == "cuda" else "cpu"
-    print(f"\nInitializing model on {device}...")
-    wrapper = Llama3dot1Wrapper(device=device)
+    # Initialize model using factory
+    print(f"\nInitializing model...")
+    wrapper = get_model_wrapper(cfg)
+    print(f"Loaded model: {wrapper.model.cfg.model_name}")
 
     # Parse activation multipliers from config
     activation_multipliers_cfg = cfg.get(

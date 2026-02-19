@@ -12,7 +12,7 @@ import sys
 import json
 from datetime import datetime
 
-from llama_3dot1_wrapper import Llama3dot1Wrapper
+from model_factory import get_model_wrapper
 from likert_scale_test import (
     run_likert_test_streaming,
     compute_kl_divergence,
@@ -72,7 +72,6 @@ class OutputLogger:
         self.tee_stderr = None
 
     def __enter__(self):
-        # Create log file with header
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
         with open(self.log_path, 'w', encoding='utf-8') as f:
             f.write(
@@ -131,7 +130,7 @@ def build_multipliers_from_trial(
 
 def soft_objective(
     trial: optuna.Trial,
-    wrapper: Llama3dot1Wrapper,
+    wrapper,
     questions_df: pd.DataFrame,
     target_neurons: List[str],
     bounds: Tuple[float, float],
@@ -251,7 +250,7 @@ def soft_objective(
 
 def objective(
     trial: optuna.Trial,
-    wrapper: Llama3dot1Wrapper,
+    wrapper,  # Llama3dot1Wrapper or Gemma3Wrapper
     questions_df: pd.DataFrame,
     baseline_scores: List[int],
     target_neurons: List[str],
@@ -327,7 +326,7 @@ def objective(
 
 
 def run_baseline(
-    wrapper: Llama3dot1Wrapper,
+    wrapper,  # Llama3dot1Wrapper or Gemma3Wrapper
     questions_df: pd.DataFrame,
     language: str = "pt",
     max_new_tokens: int = 10,
@@ -337,7 +336,7 @@ def run_baseline(
     Runs baseline evaluation without interventions.
 
     Args:
-        wrapper: LLaMA model wrapper
+        wrapper: Model wrapper (Llama or Gemma)
         questions_df: DataFrame with questions
         language: Prompt language
         max_new_tokens: Max tokens to generate
@@ -569,7 +568,7 @@ def print_best_soft_trial(
 
 
 def compute_baseline_soft_score(
-    wrapper: Llama3dot1Wrapper,
+    wrapper,  # Llama3dot1Wrapper or Gemma3Wrapper
     questions_df: pd.DataFrame,
     positive_token_id: int,
     negative_token_id: int,
@@ -737,11 +736,10 @@ def main(cfg: DictConfig):
         print(f"Total questions: {len(questions_df)}")
         print(f"Total pairs: {questions_df['pair_id'].nunique()}")
 
-        # Initialize model
-        device = cfg.extraction.device if torch.cuda.is_available(
-        ) and cfg.extraction.device == "cuda" else "cpu"
-        print(f"\nInitializing model on {device}...")
-        wrapper = Llama3dot1Wrapper(device=device)
+        # Initialize model using factory
+        print(f"\nInitializing model...")
+        wrapper = get_model_wrapper(cfg)
+        print(f"Loaded model: {wrapper.model.cfg.model_name}")
 
         # Get stance token IDs for soft metric
         positive_token_id, negative_token_id = wrapper.get_stance_token_ids(

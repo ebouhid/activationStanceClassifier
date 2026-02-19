@@ -1,23 +1,4 @@
-"""
-PoETa Benchmark Evaluator for Llama 3.1 with Activation Interventions
-
-This module provides integration with the PoETa V2 benchmark for evaluating
-baseline and intervened models using the Llama3dot1Wrapper.
-
-Usage:
-    # From command line with Hydra config:
-    python src/poeta_evaluator.py
-    
-    # Or programmatically:
-    from poeta_evaluator import run_poeta_evaluation
-    results = run_poeta_evaluation(
-        activation_multipliers={'layer_10-neuron_512': 0.5},
-        tasks=['assin_rte_greedy', 'enem_greedy'],
-        output_path='results/poeta_intervened.json'
-    )
-"""
-
-from llama_3dot1_wrapper import Llama3dot1Wrapper
+from model_factory import get_wrapper_class
 import os
 import sys
 import json
@@ -99,9 +80,9 @@ finally:
 
 class IntervenedLlamaLM(BaseLM):
     """
-    PoETa-compatible Language Model wrapper for Llama 3.1 with activation interventions.
+    PoETa-compatible Language Model wrapper for Llama 3.1 / Gemma 3 with activation interventions.
 
-    This class bridges the Llama3dot1Wrapper (which uses TransformerLens/HookedTransformer)
+    This class bridges the model wrappers (which use TransformerLens/HookedTransformer)
     with the PoETa evaluation framework, enabling evaluation of models with modified
     internal activations.
     """
@@ -112,9 +93,10 @@ class IntervenedLlamaLM(BaseLM):
         pretrained: str = "meta-llama/Llama-3.1-8B-Instruct",
         batch_size: int = 1,
         activation_multipliers: Optional[Dict[str, float]] = None,
+        wrapper_type: str = "llama",
     ):
         """
-        Initialize the intervened Llama model for PoETa evaluation.
+        Initialize the intervened model for PoETa evaluation.
 
         Args:
             device: Device to run the model on ('cuda' or 'cpu')
@@ -122,6 +104,7 @@ class IntervenedLlamaLM(BaseLM):
             batch_size: Batch size for evaluation
             activation_multipliers: Dict mapping 'layer_X-neuron_Y' to multiplier values
                                    for activation interventions. None for baseline.
+            wrapper_type: "llama" or "gemma"
         """
         super().__init__()
 
@@ -129,11 +112,12 @@ class IntervenedLlamaLM(BaseLM):
         self.batch_size_per_gpu = batch_size
         self.activation_multipliers = activation_multipliers or {}
 
-        # Initialize our custom wrapper
-        print(f"Loading model: {pretrained}")
+        # Initialize wrapper using factory
+        print(f"Loading model: {pretrained} (wrapper: {wrapper_type})")
         print(
             f"Activation interventions: {len(self.activation_multipliers)} neurons")
-        self.wrapper = Llama3dot1Wrapper(model_name=pretrained, device=device)
+        WrapperClass = get_wrapper_class(wrapper_type)
+        self.wrapper = WrapperClass(model_name=pretrained, device=device)
 
         # Get references to model and tokenizer from wrapper
         self.model = self.wrapper.model
@@ -293,6 +277,7 @@ class IntervenedLlamaLM(BaseLM):
 def run_poeta_evaluation(
     activation_multipliers: Optional[Dict[str, float]] = None,
     model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+    wrapper_type: str = "llama",
     tasks_list: Optional[List[str]] = None,
     num_fewshot: int = 0,
     prompt_modes: str = "dynamic-random",
@@ -305,12 +290,13 @@ def run_poeta_evaluation(
     wandb_prefix: str = "",
 ) -> Dict[str, Any]:
     """
-    Run PoETa V2 benchmark evaluation on a Llama model with optional interventions.
+    Run PoETa V2 benchmark evaluation on a model with optional interventions.
 
     Args:
         activation_multipliers: Dict of 'layer_X-neuron_Y' -> multiplier for interventions.
                                Use None or {} for baseline evaluation.
         model_name: HuggingFace model identifier
+        wrapper_type: "llama" or "gemma"
         tasks_list: List of PoETa task names to run. None runs all tasks.
         num_fewshot: Number of few-shot examples
         prompt_modes: Prompt mode(s), comma-separated
@@ -350,6 +336,7 @@ def run_poeta_evaluation(
         pretrained=model_name,
         batch_size=batch_size,
         activation_multipliers=activation_multipliers,
+        wrapper_type=wrapper_type,
     )
 
     # Determine output directory (convert to absolute path for saving outside PoETa dir)
@@ -495,6 +482,7 @@ def run_poeta_evaluation(
 def compare_baseline_vs_intervened(
     activation_multipliers: Dict[str, float],
     model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+    wrapper_type: str = "llama",
     tasks_list: Optional[List[str]] = None,
     num_fewshot: int = 0,
     limit: Optional[int] = None,
@@ -508,6 +496,7 @@ def compare_baseline_vs_intervened(
     Args:
         activation_multipliers: Interventions to apply to the model
         model_name: HuggingFace model identifier
+        wrapper_type: "llama" or "gemma"
         tasks_list: List of tasks to evaluate
         num_fewshot: Few-shot examples
         limit: Example limit per task
@@ -535,6 +524,7 @@ def compare_baseline_vs_intervened(
         baseline_results = run_poeta_evaluation(
             activation_multipliers=None,
             model_name=model_name,
+            wrapper_type=wrapper_type,
             tasks_list=tasks_list,
             num_fewshot=num_fewshot,
             limit=limit,
@@ -551,6 +541,7 @@ def compare_baseline_vs_intervened(
         intervened_results = run_poeta_evaluation(
             activation_multipliers=activation_multipliers,
             model_name=model_name,
+            wrapper_type=wrapper_type,
             tasks_list=tasks_list,
             num_fewshot=num_fewshot,
             limit=limit,
@@ -717,6 +708,12 @@ def main(cfg: DictConfig):
         activation_multipliers = OmegaConf.to_container(
             cfg.activation_multipliers)
 
+    # Get model configuration (support both old and new config format)
+    model_cfg = cfg.get('model', {})
+    model_name = model_cfg.get('name', cfg.get(
+        'model_name', 'meta-llama/Llama-3.1-8B-Instruct'))
+    wrapper_type = model_cfg.get('wrapper', 'llama')
+
     # Parse tasks
     tasks_list = None
     if cfg.get('tasks') and cfg.tasks != 'all':
@@ -730,8 +727,8 @@ def main(cfg: DictConfig):
         # Run comparison mode
         results = compare_baseline_vs_intervened(
             activation_multipliers=activation_multipliers or {},
-            model_name=cfg.get(
-                'model_name', 'meta-llama/Llama-3.1-8B-Instruct'),
+            model_name=model_name,
+            wrapper_type=wrapper_type,
             tasks_list=tasks_list,
             num_fewshot=cfg.get('num_fewshot', 0),
             limit=cfg.get('limit'),
@@ -753,8 +750,8 @@ def main(cfg: DictConfig):
         def run_single_eval():
             return run_poeta_evaluation(
                 activation_multipliers=activation_multipliers,
-                model_name=cfg.get(
-                    'model_name', 'meta-llama/Llama-3.1-8B-Instruct'),
+                model_name=model_name,
+                wrapper_type=wrapper_type,
                 tasks_list=tasks_list,
                 num_fewshot=cfg.get('num_fewshot', 0),
                 limit=cfg.get('limit'),

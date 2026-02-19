@@ -1,7 +1,7 @@
 import pandas as pd
 import torch
 from tqdm import tqdm
-from llama_3dot1_wrapper import Llama3dot1Wrapper
+from model_factory import get_model_wrapper
 from activation_df import ActivationDataFrame
 import os
 import hydra
@@ -43,9 +43,10 @@ def main(cfg: DictConfig):
 
     print(f"Loaded {len(df)} samples.")
 
-    # 2. Initialize Model
-    print(f"Initializing model on {device}...")
-    wrapper = Llama3dot1Wrapper(device=device)
+    # 2. Initialize Model using factory
+    print(f"Initializing model...")
+    wrapper = get_model_wrapper(cfg)
+    print(f"Loaded model: {wrapper.model.cfg.model_name}")
 
     # Ensure tokenizer has a pad token
     if wrapper.model.tokenizer.pad_token is None:
