@@ -34,7 +34,7 @@ feature_selection:
   enabled: true
   selectkbest_k: 1000
   prefilter: "f_classif"
-  n_features: 50
+  n_features: 100
   method_mrmr: "MIQ"
 
 # Likert evaluation settings

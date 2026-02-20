@@ -120,7 +120,6 @@ def mean_classification_report(reports):
 
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(cfg: DictConfig):
-    input_path = hydra.utils.to_absolute_path(cfg.data.activations_file)
     run_dir = HydraConfig.get().runtime.output_dir
     output_image_path = os.path.join(run_dir, cfg.training.image_file)
 
@@ -134,7 +133,48 @@ def main(cfg: DictConfig):
     )
     logger = logging.getLogger(__name__)
 
-    # 1. Load Data
+    # W&B configuration
+    wandb_cfg = cfg.get('wandb', {})
+    data_cfg = cfg.get('data', {})
+    activations_artifact_name = data_cfg.get('activations_artifact_name', None)
+
+    # Initialize W&B early (needed if using artifacts)
+    wandb.init(
+        project=wandb_cfg.get('project', 'activation-bias-classifier'),
+        name=wandb_cfg.get('run_name', None),
+        job_type="svm_training",
+        config={
+            'kernel': cfg.training.kernel,
+            'random_state': cfg.training.random_state,
+            'class_weight': cfg.training.class_weight,
+            'test_size': cfg.training.get('test_size', 0.2),
+            'use_mrmr': cfg.feature_selection.enabled,
+            'n_features_to_select': cfg.feature_selection.n_features if cfg.feature_selection.enabled else 'all',
+            'selectkbest_k': cfg.feature_selection.get('selectkbest_k', 500) if cfg.feature_selection.enabled else 'N/A',
+            'activations_artifact_name': activations_artifact_name,
+        }
+    )
+
+    # 1. Load Data - from artifact or local file
+    if activations_artifact_name:
+        # Fetch activations from W&B artifact
+        logger.info(
+            f"Fetching activations artifact: {activations_artifact_name}")
+        artifact = wandb.use_artifact(activations_artifact_name)
+        artifact_dir = artifact.download()
+
+        # Find the parquet file in the artifact
+        import glob
+        parquet_files = glob.glob(os.path.join(artifact_dir, "*.parquet"))
+        if not parquet_files:
+            raise FileNotFoundError(
+                f"No parquet file found in artifact: {artifact_dir}")
+        input_path = parquet_files[0]
+        logger.info(f"Using activations from artifact: {input_path}")
+    else:
+        # Use local file path from config
+        input_path = hydra.utils.to_absolute_path(cfg.data.activations_file)
+
     print(f"Loading data from {input_path}...")
     if not os.path.exists(input_path):
         print(
@@ -399,25 +439,14 @@ def main(cfg: DictConfig):
     logger.info(f"Results saved to {run_dir}")
     logger.info(f"Visualization: {output_image_path}")
 
-    # Initialize W&B
-    wandb.init(
-        project=cfg.wandb.get('project', 'activation-bias-classifier'),
-        name=cfg.wandb.get('run_name', None),
-        config={
-            'kernel': cfg.training.kernel,
-            'random_state': cfg.training.random_state,
-            'class_weight': cfg.training.class_weight,
-            'test_size': test_size,
-            'k_folds': k_folds,
-            'use_mrmr': use_mrmr,
-            'n_features_to_select': n_features_to_select if use_mrmr else 'all',
-            'selectkbest_k': selectkbest_k if use_mrmr else 'N/A',
-            'data_file': input_path,
-            'full_dataset_length': len(y),
-            'training_set_length': len(y_train_full),
-            'holdout_set_length': len(y_holdout),
-        }
-    )
+    # Update W&B config with additional runtime info
+    wandb.config.update({
+        'data_file': input_path,
+        'full_dataset_length': len(y),
+        'training_set_length': len(y_train_full),
+        'holdout_set_length': len(y_holdout),
+        'k_folds': k_folds,
+    })
 
     # 1. Static scalar attributes go to summary (no more 1-point charts)
     wandb.summary.update({
@@ -472,6 +501,29 @@ def main(cfg: DictConfig):
                 class_names=le.classes_.tolist()
             ),
         })
+
+        # --- ARTIFACT: Log feature ranking as versioned dataset artifact ---
+        feature_ranking_csv_path = os.path.join(run_dir, "feature_ranking.csv")
+        feature_ranking_df.to_csv(feature_ranking_csv_path, index=False)
+        logger.info(
+            f"Feature ranking CSV saved to: {feature_ranking_csv_path}")
+
+        # Create and log artifact
+        feature_artifact = wandb.Artifact(
+            name="svm-feature-ranking",
+            type="dataset",
+            description="SVM feature ranking from MRMR selection across CV folds",
+            metadata={
+                'n_features': len(feature_ranking_df),
+                'k_folds': k_folds,
+                'n_features_to_select': n_features_to_select,
+                'selectkbest_k': selectkbest_k,
+                'holdout_accuracy': holdout_accuracy,
+            }
+        )
+        feature_artifact.add_file(feature_ranking_csv_path)
+        wandb.log_artifact(feature_artifact)
+        logger.info(f"Feature ranking artifact logged: svm-feature-ranking")
     else:
         # Log tables and images without layer selection (when MRMR is disabled)
         wandb.log({
