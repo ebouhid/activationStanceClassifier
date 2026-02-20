@@ -80,6 +80,8 @@ def main(cfg: DictConfig):
     # 2. Initialize Model using factory
     print(f"Initializing model...")
     wrapper = get_model_wrapper(cfg)
+    if wrapper.model.tokenizer is None:
+        raise ValueError("The model wrapper must have a tokenizer.")
     print(f"Loaded model: {wrapper.model.cfg.model_name}")
 
     # Ensure tokenizer has a pad token
@@ -88,7 +90,7 @@ def main(cfg: DictConfig):
 
     # Resolve layers list (handle 'all' option)
     layers_cfg = cfg.extraction.layers
-    if isinstance(layers_cfg, str) and layers_cfg.lower() == 'all':
+    if isinstance(layers_cfg, str):
         layers = list(range(wrapper.n_layers))
     else:
         layers = list(layers_cfg)
@@ -119,8 +121,8 @@ def main(cfg: DictConfig):
             max_length=cfg.extraction.max_length
         ).to(device)
 
-        input_ids = encoding['input_ids']
-        attention_mask = encoding['attention_mask']
+        input_ids = torch.Tensor(encoding['input_ids'])
+        attention_mask = torch.Tensor(encoding['attention_mask'])
 
         try:
             layer_activations = wrapper.get_layer_activations(
