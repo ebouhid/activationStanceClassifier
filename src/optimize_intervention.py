@@ -11,8 +11,10 @@ import os
 import sys
 import json
 from datetime import datetime
+import wandb
 
 from model_factory import get_model_wrapper
+from compile_target_neurons import compile_target_neurons
 from likert_scale_test import (
     run_likert_test_streaming,
     compute_kl_divergence,
@@ -670,7 +672,46 @@ def main(cfg: DictConfig):
         opt_cfg = cfg.optimization
         likert_cfg = cfg.likert
 
-        target_neurons = list(opt_cfg.target_neurons)
+        # W&B configuration
+        wandb_cfg = cfg.get('wandb', {})
+        feature_artifact_name = opt_cfg.get('feature_artifact_name', None)
+        target_neuron_count = opt_cfg.get('target_neuron_count', 80)
+
+        # Initialize W&B with job_type="optimization"
+        wandb_config = OmegaConf.to_container(cfg, resolve=True)
+        wandb.init(
+            project=wandb_cfg.get('project', 'activation-bias-classifier'),
+            name=wandb_cfg.get('run_name', None),
+            job_type="optimization",
+            config=wandb_config if isinstance(wandb_config, dict) else {}
+        )
+
+        # Determine target neurons: from artifact or config
+        if feature_artifact_name:
+            # Fetch SVM feature ranking artifact dynamically
+            print(
+                f"\nFetching feature ranking artifact: {feature_artifact_name}")
+            artifact = wandb.use_artifact(feature_artifact_name)
+            artifact_dir = artifact.download()
+
+            # Load CSV and compile target neurons
+            feature_ranking_path = os.path.join(
+                artifact_dir, "feature_ranking.csv")
+            feature_ranking_df = pd.read_csv(feature_ranking_path)
+            print(
+                f"Loaded feature ranking with {len(feature_ranking_df)} features")
+
+            # Compile target neurons using the feature analysis function
+            target_neurons = compile_target_neurons(
+                feature_ranking_df,
+                target_count=target_neuron_count
+            )
+            print(
+                f"Compiled {len(target_neurons)} target neurons from artifact")
+        else:
+            # Use target neurons from YAML config
+            target_neurons = list(opt_cfg.target_neurons)
+
         bounds = (opt_cfg.bounds[0], opt_cfg.bounds[1])
         n_trials = opt_cfg.n_trials
         study_name = opt_cfg.study_name
@@ -856,12 +897,41 @@ def main(cfg: DictConfig):
         print(f"\nResults saved to: {results_path}")
         print(f"Terminal log saved to: {log_path}")
 
+        # --- ARTIFACT: Log intervention multipliers as versioned model-weights artifact ---
+        best_trial = study.best_trial
+        multipliers_artifact = wandb.Artifact(
+            name="intervention-multipliers",
+            type="model-weights",
+            description="Optimized neuron activation multipliers for bias intervention",
+            metadata={
+                'baseline_pi': baseline_pi,
+                'baseline_soft_score': baseline_ref,
+                'best_trial_number': best_trial.number,
+                'best_trial_value': best_trial.value,
+                'n_trials': len(study.trials),
+                'objective_mode': objective_mode,
+                'direction': direction,
+                'n_target_neurons': len(target_neurons),
+            }
+        )
+        multipliers_artifact.add_file(results_path)
+        wandb.log_artifact(multipliers_artifact)
+        print(f"Intervention multipliers artifact logged: intervention-multipliers")
+
+        # Log summary metrics to W&B
+        wandb.summary.update({
+            'baseline_pi': baseline_pi,
+            'baseline_soft_score': baseline_ref,
+            'best_soft_score': best_trial.value,
+            'n_trials': len(study.trials),
+            'n_target_neurons': len(target_neurons),
+        })
+
         # Print best solution for easy copy-paste into config
         print("\n" + "=" * 70)
         print("BEST MULTIPLIERS (copy to config)")
         print("=" * 70)
 
-        best_trial = study.best_trial
         mode_label = f"{direction}s {'|soft PI|' if use_absolute else 'signed soft PI'}"
         print(f"\nBest soft metric solution ({mode_label}):")
         print("activation_multipliers: {")
@@ -880,6 +950,9 @@ def main(cfg: DictConfig):
             print(f"The optimizer {direction}d the signed soft PI.")
         print("To validate the real-world PI, run likert_scale_test.py")
         print("with the best multipliers from above.")
+
+        # Finish W&B run
+        wandb.finish()
 
     return study
 
