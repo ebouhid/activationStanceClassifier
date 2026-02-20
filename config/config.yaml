@@ -1,13 +1,27 @@
-data:
-  input_csv: "/files/datasets/political_leaning_texts/labeled_propositions.csv"
-  activations_file: "data/activations_bignews_l19.csv"
+# ============================================================================
+# BASE CONFIGURATION
+# ============================================================================
+# This is the default config. Override values via CLI or specific config files.
+# Example: python src/train_eval_svc.py data.activations_artifact_name="activations-anderson-llama-all:latest"
 
+# Model configuration
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"  # or "google/gemma-3-4b-it"
+  wrapper: "llama"  # "llama" or "gemma"
+
+# Data paths
+data:
+  # Input data for extraction
+  input_csv: "/files/datasets/political_leaning_texts/anderson_propositions_cured.csv"
+
+# Activation extraction settings
 extraction:
   batch_size: 8
-  layers: [19]
-  device: "cuda" # or "cpu"
+  layers: "all"  # "all" or list like [14, 15, 16]
+  device: "cuda"
   max_length: 1024
 
+# SVM training settings
 training:
   test_size: 0.4
   random_state: 42
@@ -15,26 +29,33 @@ training:
   image_file: "svc_decision_boundary.png"
   class_weight: "balanced"
 
+# Feature selection settings
 feature_selection:
   enabled: true
-  selectkbest_k: 1000  # Number of features to keep with SelectKBest (pre-filter before MRMR)
+  selectkbest_k: 1000
   prefilter: "f_classif"
-  n_features: 50  # Number of features to select with MRMR
-  method_mrmr: "MIQ"   # MIQ (MID) or MID
+  n_features: 50
+  method_mrmr: "MIQ"
 
+# Likert evaluation settings
 likert:
   questions_csv: "likert/questions_anderson.csv"
-  language: "pt" # or "en"
+  language: "pt"
   use_chat_format: true
   max_new_tokens: 10
   temperature: 0.0
   experiment_name: null
   activation_multipliers: null
+  # W&B artifact name for multipliers (optional, overrides activation_multipliers)
+  multiplier_artifact_name: null
+  job_type: "likert_eval"
 
+# Hydra output directory
 hydra:
   run:
     dir: runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
+# W&B tracking
 wandb:
-  project: "activation-bias-classifier"
+  project: "activation-stance-classifier"
   run_name: null

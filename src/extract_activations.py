@@ -5,7 +5,9 @@ from model_factory import get_model_wrapper
 from activation_df import ActivationDataFrame
 import os
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
+from hydra.core.hydra_config import HydraConfig
+import wandb
 
 
 def get_last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
@@ -20,10 +22,42 @@ def get_last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
 def main(cfg: DictConfig):
     # Configuration from Hydra
     input_path = hydra.utils.to_absolute_path(cfg.data.input_csv)
-    output_path = cfg.data.activations_file
     batch_size = cfg.extraction.batch_size
     device = cfg.extraction.device if torch.cuda.is_available(
     ) and cfg.extraction.device == "cuda" else "cpu"
+
+    # Get Hydra output directory
+    hydra_cfg = HydraConfig.get()
+    run_dir = hydra_cfg.runtime.output_dir
+
+    # W&B configuration
+    wandb_cfg = cfg.get('wandb', {})
+
+    # Determine artifact name based on dataset and model
+    dataset_name = os.path.basename(input_path).replace(
+        '.csv', '').replace('_propositions', '')
+    model_short = cfg.model.wrapper  # 'llama' or 'gemma'
+    layers = cfg.extraction.layers
+    layers_str = 'all' if layers == 'all' else f"L{str(layers)}"
+    artifact_name = f"activations-{dataset_name}-{model_short}-{layers_str}"
+    output_path = f"data/{artifact_name}.parquet"
+
+    # Initialize W&B with job_type="extraction"
+    wandb.init(
+        project=wandb_cfg.get('project', 'activation-bias-classifier'),
+        name=wandb_cfg.get('run_name', None),
+        job_type="extraction",
+        config={
+            'input_csv': input_path,
+            'output_file': output_path,
+            'batch_size': batch_size,
+            'device': device,
+            'layers': layers_str,
+            'max_length': cfg.extraction.max_length,
+            'model_name': cfg.model.name,
+            'model_wrapper': cfg.model.wrapper,
+        }
+    )
 
     # 1. Load Data
     print(f"Loading data from {input_path}...")
@@ -114,7 +148,41 @@ def main(cfg: DictConfig):
     print(f"Saving results to {output_path}...")
     # Hydra changes cwd to the run dir, so we just save to the filename
     activation_df.save(output_path)
-    print(f"Done. Saved to {os.getcwd()}/{output_path}")
+    full_output_path = os.path.join(os.getcwd(), output_path)
+    print(f"Done. Saved to {full_output_path}")
+
+    # --- ARTIFACT: Log activations as versioned dataset artifact ---
+
+    activations_artifact = wandb.Artifact(
+        name=artifact_name,
+        type="dataset",
+        description=f"Extracted activations from {cfg.model.name} on {dataset_name} dataset",
+        metadata={
+            'model_name': cfg.model.name,
+            'model_wrapper': cfg.model.wrapper,
+            'input_csv': input_path,
+            'n_samples': total_samples,
+            'n_layers': len(layers),
+            'layers': layers,
+            'd_model': d_model,
+            'batch_size': batch_size,
+            'max_length': cfg.extraction.max_length,
+        }
+    )
+    activations_artifact.add_file(full_output_path)
+    wandb.log_artifact(activations_artifact)
+    print(f"Activations artifact logged: {artifact_name}")
+
+    # Log summary metrics
+    wandb.summary.update({
+        'n_samples': total_samples,
+        'n_layers': len(layers),
+        'd_model': d_model,
+        'n_features': len(layers) * d_model,
+    })
+
+    # Finish W&B run
+    wandb.finish()
 
 
 if __name__ == "__main__":
