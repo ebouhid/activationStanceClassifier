@@ -42,16 +42,28 @@ def get_model_wrapper(cfg: DictConfig, device: Optional[str] = None):
     if wrapper_type == "llama":
         from llama_3dot1_wrapper import Llama3dot1Wrapper
         if model_name:
-            return Llama3dot1Wrapper(model_name=model_name, device=device)
+            model_wrapper = Llama3dot1Wrapper(model_name=model_name, device=device)
+            if model_wrapper.model.tokenizer is None:
+                raise ValueError(f"Failed to initialize tokenizer for model: {model_name}")
+            return model_wrapper
         else:
-            return Llama3dot1Wrapper(device=device)
+            model_wrapper = Llama3dot1Wrapper(device=device)
+            if model_wrapper.model.tokenizer is None:
+                raise ValueError("Failed to initialize tokenizer for default Llama model")
+            return model_wrapper
 
     elif wrapper_type == "gemma":
         from gemma_3_wrapper import Gemma3Wrapper
         if model_name:
-            return Gemma3Wrapper(model_name=model_name, device=device, dtype=torch.bfloat16)
+            model_wrapper = Gemma3Wrapper(model_name=model_name, device=device, dtype=torch.bfloat16)
+            if model_wrapper.model.tokenizer is None:
+                raise ValueError(f"Failed to initialize tokenizer for model: {model_name}")
+            return model_wrapper
         else:
-            return Gemma3Wrapper(device=device, dtype=torch.bfloat16)
+            model_wrapper = Gemma3Wrapper(device=device, dtype=torch.bfloat16)
+            if model_wrapper.model.tokenizer is None:
+                raise ValueError("Failed to initialize tokenizer for default Gemma model")
+            return model_wrapper
 
     else:
         raise ValueError(
