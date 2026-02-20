@@ -9,7 +9,7 @@ from typing import Union, Optional
 from omegaconf import DictConfig
 
 
-def get_model_wrapper(cfg: DictConfig, device: Optional[str] = None):
+def get_model_wrapper(cfg: DictConfig, device: str = "auto"):
     """
     Factory function to create the appropriate model wrapper based on config.
 
@@ -19,7 +19,7 @@ def get_model_wrapper(cfg: DictConfig, device: Optional[str] = None):
                model:
                  name: "meta-llama/Llama-3.1-8B-Instruct"  # or "google/gemma-3-9b-it"
                  wrapper: "llama"  # "llama" or "gemma"
-        device: Override device from config. If None, uses cfg.extraction.device.
+        device: Override device from config. If "auto", uses cfg.extraction.device.
 
     Returns:
         Model wrapper instance (Llama3dot1Wrapper or Gemma3Wrapper)
@@ -29,7 +29,7 @@ def get_model_wrapper(cfg: DictConfig, device: Optional[str] = None):
     """
     # Determine device
     import torch
-    if device is None:
+    if device == "auto":
         device = cfg.get("extraction", {}).get("device", "cuda")
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
