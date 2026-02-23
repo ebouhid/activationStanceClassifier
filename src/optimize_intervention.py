@@ -899,8 +899,9 @@ def main(cfg: DictConfig):
 
         # --- ARTIFACT: Log intervention multipliers as versioned model-weights artifact ---
         best_trial = study.best_trial
+        multipliers_artifact_name = opt_cfg.get('multipliers_artifact_name', 'intervention-multipliers')
         multipliers_artifact = wandb.Artifact(
-            name="intervention-multipliers",
+            name=multipliers_artifact_name,
             type="model-weights",
             description="Optimized neuron activation multipliers for bias intervention",
             metadata={
@@ -916,7 +917,7 @@ def main(cfg: DictConfig):
         )
         multipliers_artifact.add_file(results_path)
         wandb.log_artifact(multipliers_artifact)
-        print(f"Intervention multipliers artifact logged: intervention-multipliers")
+        print(f"Intervention multipliers artifact logged: {multipliers_artifact_name}")
 
         # Log summary metrics to W&B
         wandb.summary.update({
