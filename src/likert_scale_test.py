@@ -30,6 +30,8 @@ import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Generator, Union
 import re
+import wandb
+import glob
 
 
 # Likert scale mapping [-2 to 2]
@@ -147,7 +149,7 @@ def parse_likert_response(response: str, language: str) -> Optional[int]:
     response = response.strip()
 
     # Get the appropriate scale based on language
-    scale = LIKERT_SCALE_ALT if language == "pt" else LIKERT_SCALE_EN
+    scale = LIKERT_SCALE if language == "pt" else LIKERT_SCALE_EN
 
     # First try exact match (case-insensitive)
     response_lower = response.lower()
@@ -598,9 +600,30 @@ def main(cfg: DictConfig):
     """
     Main function to run the Likert scale political stance test.
     """
+    # W&B configuration
+    wandb_cfg = cfg.get('wandb', {})
+    likert_cfg = cfg.get("likert", {})
+
+    # Get multiplier artifact name if provided
+    multiplier_artifact_name = likert_cfg.get('multiplier_artifact_name', None)
+    job_type = likert_cfg.get('job_type', 'likert_eval')
+
+    # Initialize W&B
+    wandb.init(
+        project=wandb_cfg.get('project', 'activation-bias-classifier'),
+        name=wandb_cfg.get('run_name', None),
+        job_type=job_type,
+        config={
+            'questions_csv': likert_cfg.get('questions_csv'),
+            'language': likert_cfg.get('language', 'pt'),
+            'temperature': likert_cfg.get('temperature', 0.0),
+            'multiplier_artifact_name': multiplier_artifact_name,
+        }
+    )
+
     # Load questions
     questions_path = hydra.utils.to_absolute_path(
-        cfg.get("likert", {}).get("questions_csv", "questions_anderson.csv")
+        likert_cfg.get("questions_csv", "questions_anderson.csv")
     )
 
     print(f"Loading questions from {questions_path}...")
@@ -633,16 +656,45 @@ def main(cfg: DictConfig):
     wrapper = get_model_wrapper(cfg)
     print(f"Loaded model: {wrapper.model.cfg.model_name}")
 
-    # Parse activation multipliers from config
-    activation_multipliers_cfg = cfg.get(
-        "likert", {}).get("activation_multipliers", None)
+    # Parse activation multipliers: from artifact or config
     activation_multipliers = None
-    if activation_multipliers_cfg is not None:
-        # Convert OmegaConf to dict, keys are neuron names (e.g., 'layer_14-neuron_512')
-        activation_multipliers = {str(k): float(
-            v) for k, v in dict(activation_multipliers_cfg).items()}
+
+    if multiplier_artifact_name:
+        # Fetch multipliers from W&B artifact
+        print(f"\nFetching multiplier artifact: {multiplier_artifact_name}")
+        artifact = wandb.use_artifact(multiplier_artifact_name)
+        artifact_dir = artifact.download()
+
+        # Find optimization results JSON file
+        json_files = glob.glob(os.path.join(
+            artifact_dir, "optimization_results_*.json"))
+        if not json_files:
+            raise FileNotFoundError(
+                f"No optimization_results_*.json found in artifact: {artifact_dir}")
+
+        results_path = json_files[0]  # Take the most recent if multiple
+        with open(results_path, 'r', encoding='utf-8') as f:
+            opt_results = json.load(f)
+
+        # Extract multipliers from best trial
+        best_trial = opt_results.get('best_trial', {})
+        activation_multipliers = best_trial.get('multipliers', {})
         print(
-            f"\nActivation intervention configured: {activation_multipliers}")
+            f"Loaded {len(activation_multipliers)} multipliers from artifact")
+        print(
+            f"Artifact best trial value: {best_trial.get('soft_score', 'N/A')}")
+    else:
+        # Parse from config
+        activation_multipliers_cfg = likert_cfg.get(
+            "activation_multipliers", None)
+        if activation_multipliers_cfg is not None:
+            # Convert OmegaConf to dict
+            activation_multipliers = {str(k): float(v)
+                                      for k, v in dict(activation_multipliers_cfg).items()}
+
+    if activation_multipliers:
+        print(
+            f"\nActivation intervention configured: {len(activation_multipliers)} neurons")
 
     # Run test
     print("\nRunning Likert scale test...")
@@ -710,7 +762,7 @@ def main(cfg: DictConfig):
     # Save results
     hydra_cfg = HydraConfig.get()
     output_dir = hydra_cfg.runtime.output_dir
-    experiment_name = cfg.get("likert", {}).get("experiment_name", None)
+    experiment_name = likert_cfg.get("experiment_name", None)
 
     saved_files = save_results(
         results_df, pi_data, output_dir, experiment_name, experiment_config)
@@ -719,6 +771,46 @@ def main(cfg: DictConfig):
     print(f"  Sentences: {saved_files['sentences_csv']}")
     print(f"  Pairs: {saved_files['pairs_csv']}")
     print(f"  Metrics: {saved_files['metrics_json']}")
+
+    # --- ARTIFACT: Log evaluation results as versioned artifact ---
+    # Use different artifact names based on whether intervention was applied
+    artifact_name = "likert-intervened-results" if activation_multipliers else "likert-baseline-results"
+
+    likert_artifact = wandb.Artifact(
+        name=artifact_name,
+        type="evaluation-data",
+        description=f"Likert scale evaluation results {'with' if activation_multipliers else 'without'} activation intervention",
+        metadata={
+            'model_polarization_index': metrics.get('model_polarization_index'),
+            'pi_std': metrics.get('pi_std'),
+            'interpretation': metrics.get('interpretation'),
+            'valid_pairs': metrics.get('valid_pairs'),
+            'total_pairs': metrics.get('total_pairs'),
+            'has_intervention': activation_multipliers is not None,
+            'n_multipliers': len(activation_multipliers) if activation_multipliers else 0,
+        }
+    )
+
+    # Add all result files
+    likert_artifact.add_file(saved_files['sentences_csv'])
+    likert_artifact.add_file(saved_files['pairs_csv'])
+    likert_artifact.add_file(saved_files['metrics_json'])
+
+    wandb.log_artifact(likert_artifact)
+    print(f"Likert results artifact logged: {artifact_name}")
+
+    # Log summary metrics to W&B
+    wandb.summary.update({
+        'model_polarization_index': metrics.get('model_polarization_index'),
+        'pi_std': metrics.get('pi_std'),
+        'interpretation': metrics.get('interpretation'),
+        'valid_pairs': metrics.get('valid_pairs'),
+        'total_pairs': metrics.get('total_pairs'),
+        'has_intervention': activation_multipliers is not None,
+    })
+
+    # Finish W&B run
+    wandb.finish()
 
     return results_df, pi_data
 
