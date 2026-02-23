@@ -510,7 +510,7 @@ def main(cfg: DictConfig):
 
         # Create and log artifact
         feature_artifact = wandb.Artifact(
-            name="svm-feature-ranking",
+            name=f"svm-feature-ranking-{activations_artifact_name.split(':')[0].split('/')[-1]}",
             type="dataset",
             description="SVM feature ranking from MRMR selection across CV folds",
             metadata={
@@ -523,7 +523,7 @@ def main(cfg: DictConfig):
         )
         feature_artifact.add_file(feature_ranking_csv_path)
         wandb.log_artifact(feature_artifact)
-        logger.info(f"Feature ranking artifact logged: svm-feature-ranking")
+        logger.info(f"Feature ranking artifact logged: {feature_artifact.name}")
     else:
         # Log tables and images without layer selection (when MRMR is disabled)
         wandb.log({
