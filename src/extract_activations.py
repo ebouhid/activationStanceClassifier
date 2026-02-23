@@ -21,7 +21,6 @@ def get_last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(cfg: DictConfig):
     # Configuration from Hydra
-    input_path = hydra.utils.to_absolute_path(cfg.data.input_csv)
     batch_size = cfg.extraction.batch_size
     device = cfg.extraction.device if torch.cuda.is_available(
     ) and cfg.extraction.device == "cuda" else "cpu"
@@ -33,6 +32,30 @@ def main(cfg: DictConfig):
     # W&B configuration
     wandb_cfg = cfg.get('wandb', {})
 
+    # Resolve input path: prefer W&B artifact if provided
+    dataset_artifact_name = cfg.data.get('dataset_artifact_name', None)
+    if dataset_artifact_name:
+        # Initialize W&B early to download artifact
+        wandb.init(
+            project=wandb_cfg.get('project', 'activation-bias-classifier'),
+            name=wandb_cfg.get('run_name', None),
+            job_type="extraction",
+        )
+        print(f"Downloading dataset artifact: {dataset_artifact_name}")
+        artifact = wandb.use_artifact(dataset_artifact_name, type='dataset')
+        artifact_dir = artifact.download()
+        # Find CSV file in artifact
+        csv_files = [f for f in os.listdir(artifact_dir) if f.endswith('.csv')]
+        if not csv_files:
+            raise ValueError(
+                f"No CSV file found in artifact {dataset_artifact_name}")
+        input_path = os.path.join(artifact_dir, csv_files[0])
+        print(f"Using dataset from artifact: {input_path}")
+        wandb_initialized = True
+    else:
+        input_path = hydra.utils.to_absolute_path(cfg.data.input_csv)
+        wandb_initialized = False
+
     # Determine artifact name based on dataset and model
     dataset_name = os.path.basename(input_path).replace(
         '.csv', '').replace('_propositions', '')
@@ -42,22 +65,26 @@ def main(cfg: DictConfig):
     artifact_name = f"activations-{dataset_name}-{model_short}-{layers_str}"
     output_path = f"data/{artifact_name}.parquet"
 
-    # Initialize W&B with job_type="extraction"
-    wandb.init(
-        project=wandb_cfg.get('project', 'activation-bias-classifier'),
-        name=wandb_cfg.get('run_name', None),
-        job_type="extraction",
-        config={
-            'input_csv': input_path,
-            'output_file': output_path,
-            'batch_size': batch_size,
-            'device': device,
-            'layers': layers_str,
-            'max_length': cfg.extraction.max_length,
-            'model_name': cfg.model.name,
-            'model_wrapper': cfg.model.wrapper,
-        }
-    )
+    # Initialize W&B with job_type="extraction" (if not already initialized for artifact download)
+    if not wandb_initialized:
+        wandb.init(
+            project=wandb_cfg.get('project', 'activation-bias-classifier'),
+            name=wandb_cfg.get('run_name', None),
+            job_type="extraction",
+        )
+
+    # Update W&B config
+    wandb.config.update({
+        'input_csv': input_path,
+        'dataset_artifact': dataset_artifact_name,
+        'output_file': output_path,
+        'batch_size': batch_size,
+        'device': device,
+        'layers': layers_str,
+        'max_length': cfg.extraction.max_length,
+        'model_name': cfg.model.name,
+        'model_wrapper': cfg.model.wrapper,
+    })
 
     # 1. Load Data
     print(f"Loading data from {input_path}...")
