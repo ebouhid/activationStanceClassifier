@@ -683,7 +683,7 @@ def main(cfg: DictConfig):
             project=wandb_cfg.get('project', 'activation-bias-classifier'),
             name=wandb_cfg.get('run_name', None),
             job_type="optimization",
-            config=wandb_config if isinstance(wandb_config, dict) else {}
+            config=wandb_config
         )
 
         # Determine target neurons: from artifact or config
@@ -899,7 +899,7 @@ def main(cfg: DictConfig):
 
         # --- ARTIFACT: Log intervention multipliers as versioned model-weights artifact ---
         best_trial = study.best_trial
-        multipliers_artifact_name = opt_cfg.get('multipliers_artifact_name', 'intervention-multipliers')
+        multipliers_artifact_name = study_name
         multipliers_artifact = wandb.Artifact(
             name=multipliers_artifact_name,
             type="model-weights",
