@@ -6,3 +6,4 @@ wandb/
 .DS_Store
 config/
 config_bak/
+artifacts/
