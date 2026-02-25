@@ -925,6 +925,7 @@ def main(cfg: DictConfig):
             'baseline_soft_score': baseline_ref,
             'best_soft_score': best_trial.value,
             'n_trials': len(study.trials),
+            'best_trial': best_trial.number,
             'n_target_neurons': len(target_neurons),
         })
 
