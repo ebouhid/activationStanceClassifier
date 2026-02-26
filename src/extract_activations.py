@@ -34,12 +34,14 @@ def main(cfg: DictConfig):
 
     # Resolve input path: prefer W&B artifact if provided
     dataset_artifact_name = cfg.data.get('dataset_artifact_name', None)
+    wandb_config = OmegaConf.to_container(cfg, resolve=True)
     if dataset_artifact_name:
         # Initialize W&B early to download artifact
         wandb.init(
             project=wandb_cfg.get('project', 'activation-bias-classifier'),
             name=wandb_cfg.get('run_name', None),
             job_type="extraction",
+            config=wandb_config,
         )
         print(f"Downloading dataset artifact: {dataset_artifact_name}")
         artifact = wandb.use_artifact(dataset_artifact_name, type='dataset')

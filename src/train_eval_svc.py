@@ -20,6 +20,7 @@ from omegaconf import DictConfig
 from sklearn.model_selection import StratifiedKFold
 from mrmr import mrmr_classif
 import wandb
+from omegaconf import DictConfig, OmegaConf
 
 
 def plot_svm_decision_boundary(X, y, clf, le, output_path, title="SVC Decision Boundary (PCA reduced)"):
@@ -139,20 +140,12 @@ def main(cfg: DictConfig):
     activations_artifact_name = data_cfg.get('activations_artifact_name', None)
 
     # Initialize W&B early (needed if using artifacts)
+    wandb_config = OmegaConf.to_container(cfg, resolve=True)
     wandb.init(
         project=wandb_cfg.get('project', 'activation-bias-classifier'),
         name=wandb_cfg.get('run_name', None),
         job_type="svm_training",
-        config={
-            'kernel': cfg.training.kernel,
-            'random_state': cfg.training.random_state,
-            'class_weight': cfg.training.class_weight,
-            'test_size': cfg.training.get('test_size', 0.2),
-            'use_mrmr': cfg.feature_selection.enabled,
-            'n_features_to_select': cfg.feature_selection.n_features if cfg.feature_selection.enabled else 'all',
-            'selectkbest_k': cfg.feature_selection.get('selectkbest_k', 500) if cfg.feature_selection.enabled else 'N/A',
-            'activations_artifact_name': activations_artifact_name,
-        }
+        config=wandb_config,
     )
 
     # 1. Load Data - from artifact or local file

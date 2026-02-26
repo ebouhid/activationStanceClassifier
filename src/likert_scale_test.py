@@ -32,6 +32,7 @@ from typing import Optional, Dict, Any, List, Generator, Union
 import re
 import wandb
 import glob
+from omegaconf import DictConfig, OmegaConf
 
 
 # Likert scale mapping [-2 to 2]
@@ -609,16 +610,21 @@ def main(cfg: DictConfig):
     job_type = likert_cfg.get('job_type', 'likert_eval')
 
     # Initialize W&B
-    wandb.init(
-        project=wandb_cfg.get('project', 'activation-bias-classifier'),
-        name=wandb_cfg.get('run_name', None),
-        job_type=job_type,
-        config={
+    wandb_config = OmegaConf.to_container(cfg, resolve=True)
+    wandb_config.update(
+        {
             'questions_csv': likert_cfg.get('questions_csv'),
             'language': likert_cfg.get('language', 'pt'),
             'temperature': likert_cfg.get('temperature', 0.0),
             'multiplier_artifact_name': multiplier_artifact_name,
         }
+    )
+
+    wandb.init(
+        project=wandb_cfg.get('project', 'activation-bias-classifier'),
+        name=wandb_cfg.get('run_name', None),
+        job_type=job_type,
+        config=wandb_config,
     )
 
     # Load questions
