@@ -10,13 +10,15 @@ class Llama3dot1Wrapper:
     using forward hooks.
     """
 
-    def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", device: str = "cuda"):
+    def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", device: str = "cuda", n_devices: int = 1):
         """
         Initializes the model, mimicking the configuration in the provided files.
 
         Args:
             model_name (str): The name of the model to load.
             device (str): The device (e.g., 'cuda', 'cpu') to load the model onto.
+            n_devices (int): Number of GPUs to split the model across (model parallelism).
+                             When > 1, transformer blocks are distributed across GPUs.
         """
         self.device = device
 
@@ -27,7 +29,8 @@ class Llama3dot1Wrapper:
             fold_ln=False,
             center_writing_weights=False,
             center_unembed=False,
-            dtype=torch.float16
+            dtype=torch.float16,
+            n_devices=n_devices,
         )
 
         # Ensure a pad token exists for masking if needed

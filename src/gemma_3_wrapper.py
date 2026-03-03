@@ -16,6 +16,7 @@ class Gemma3Wrapper:
         model_name: str = "google/gemma-3-9b-it",
         device: str = "cuda",
         dtype: torch.dtype = torch.float16,
+        n_devices: int = 1,
     ):
         """
         Args:
@@ -23,6 +24,8 @@ class Gemma3Wrapper:
                         (e.g. "google/gemma-3-9b-it")
             device: "cuda" or "cpu"
             dtype: torch.float16 or torch.bfloat16 (torch.float16 works kinda cringe, tbh)
+            n_devices: Number of GPUs to split the model across (model parallelism).
+                       When > 1, transformer blocks are distributed across GPUs.
         """
         self.device = device
 
@@ -33,6 +36,7 @@ class Gemma3Wrapper:
             center_writing_weights=False,
             center_unembed=False,
             dtype=dtype,
+            n_devices=n_devices,
         )
 
         # Ensure pad token exists
