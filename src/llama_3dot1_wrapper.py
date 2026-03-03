@@ -10,26 +10,27 @@ class Llama3dot1Wrapper:
     using forward hooks.
     """
 
-    def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", device: str = "cuda", n_devices: int = 1):
+    def __init__(self, model_name: str = "meta-llama/Llama-3.1-8B-Instruct", device: str = "cuda", dtype: torch.dtype = torch.float16, n_devices: int = 1):
         """
         Initializes the model, mimicking the configuration in the provided files.
 
         Args:
             model_name (str): The name of the model to load.
             device (str): The device (e.g., 'cuda', 'cpu') to load the model onto.
+            dtype (torch.dtype): Model precision (torch.float16 or torch.bfloat16).
             n_devices (int): Number of GPUs to split the model across (model parallelism).
                              When > 1, transformer blocks are distributed across GPUs.
         """
         self.device = device
 
-        # Load the base model using HookedTransformer (FP16 as seen in model_utils.py)
+        # Load the base model using HookedTransformer
         self.model = HookedTransformer.from_pretrained(
             model_name,
             device=self.device,
             fold_ln=False,
             center_writing_weights=False,
             center_unembed=False,
-            dtype=torch.float16,
+            dtype=dtype,
             n_devices=n_devices,
         )
 

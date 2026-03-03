@@ -40,18 +40,35 @@ def get_model_wrapper(cfg: DictConfig, device: str = "auto"):
     model_name = model_cfg.get("name", None)
     n_devices = model_cfg.get("n_devices", 1)
 
+    # Resolve dtype from config string
+    dtype_str = model_cfg.get("dtype", "float16").lower()
+    dtype_map = {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }
+    if dtype_str not in dtype_map:
+        raise ValueError(
+            f"Unknown dtype: '{dtype_str}'. "
+            f"Supported: {list(dtype_map.keys())}"
+        )
+    dtype = dtype_map[dtype_str]
+
     if wrapper_type == "llama":
         from llama_3dot1_wrapper import Llama3dot1Wrapper
         if model_name:
             model_wrapper = Llama3dot1Wrapper(
-                model_name=model_name, device=device, n_devices=n_devices)
+                model_name=model_name, device=device, dtype=dtype, n_devices=n_devices)
             if model_wrapper.model.tokenizer is None:
                 raise ValueError(
                     f"Failed to initialize tokenizer for model: {model_name}")
             return model_wrapper
         else:
             model_wrapper = Llama3dot1Wrapper(
-                device=device, n_devices=n_devices)
+                device=device, dtype=dtype, n_devices=n_devices)
             if model_wrapper.model.tokenizer is None:
                 raise ValueError(
                     "Failed to initialize tokenizer for default Llama model")
@@ -61,14 +78,14 @@ def get_model_wrapper(cfg: DictConfig, device: str = "auto"):
         from gemma_3_wrapper import Gemma3Wrapper
         if model_name:
             model_wrapper = Gemma3Wrapper(
-                model_name=model_name, device=device, dtype=torch.bfloat16, n_devices=n_devices)
+                model_name=model_name, device=device, dtype=dtype, n_devices=n_devices)
             if model_wrapper.model.tokenizer is None:
                 raise ValueError(
                     f"Failed to initialize tokenizer for model: {model_name}")
             return model_wrapper
         else:
             model_wrapper = Gemma3Wrapper(
-                device=device, dtype=torch.bfloat16, n_devices=n_devices)
+                device=device, dtype=dtype, n_devices=n_devices)
             if model_wrapper.model.tokenizer is None:
                 raise ValueError(
                     "Failed to initialize tokenizer for default Gemma model")
