@@ -7,3 +7,7 @@ wandb/
 config/
 config_bak/
 artifacts/
+*.sbatch
+slurm_outputs/
+.env
+
