@@ -120,11 +120,19 @@ def format_chat_prompt(tokenizer, user_message: str, language: str = "pt") -> st
         {"role": "user", "content": user_message}
     ]
 
+    # Disable thinking mode for models that support it (e.g., Qwen3)
+    # to get direct answers instead of <think>...</think> reasoning
+    template_kwargs = {}
+    chat_template = getattr(tokenizer, 'chat_template', '') or ''
+    if 'enable_thinking' in chat_template:
+        template_kwargs['enable_thinking'] = False
+
     # Apply chat template and add generation prompt
     formatted = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
-        add_generation_prompt=True
+        add_generation_prompt=True,
+        **template_kwargs
     )
 
     return formatted
