@@ -101,10 +101,27 @@ def get_model_wrapper(cfg: DictConfig, device: str = "auto"):
                     "Failed to initialize tokenizer for default Gemma model")
             return model_wrapper
 
+    elif wrapper_type == "qwen":
+        from qwen_3_wrapper import Qwen3Wrapper
+        if model_name:
+            model_wrapper = Qwen3Wrapper(
+                model_name=model_name, device=device, dtype=dtype, n_devices=n_devices)
+            if model_wrapper.model.tokenizer is None:
+                raise ValueError(
+                    f"Failed to initialize tokenizer for model: {model_name}")
+            return model_wrapper
+        else:
+            model_wrapper = Qwen3Wrapper(
+                device=device, dtype=dtype, n_devices=n_devices)
+            if model_wrapper.model.tokenizer is None:
+                raise ValueError(
+                    "Failed to initialize tokenizer for default Qwen model")
+            return model_wrapper
+
     else:
         raise ValueError(
             f"Unknown wrapper type: '{wrapper_type}'. "
-            f"Supported types: 'llama', 'gemma'"
+            f"Supported types: 'llama', 'gemma', 'qwen'"
         )
 
 
@@ -113,7 +130,7 @@ def get_wrapper_class(wrapper_type: str):
     Get the wrapper class without instantiating it.
 
     Args:
-        wrapper_type: "llama" or "gemma"
+        wrapper_type: "llama", "gemma", or "qwen"
 
     Returns:
         The wrapper class (not an instance)
@@ -126,8 +143,11 @@ def get_wrapper_class(wrapper_type: str):
     elif wrapper_type == "gemma":
         from gemma_3_wrapper import Gemma3Wrapper
         return Gemma3Wrapper
+    elif wrapper_type == "qwen":
+        from qwen_3_wrapper import Qwen3Wrapper
+        return Qwen3Wrapper
     else:
         raise ValueError(
             f"Unknown wrapper type: '{wrapper_type}'. "
-            f"Supported types: 'llama', 'gemma'"
+            f"Supported types: 'llama', 'gemma', 'qwen'"
         )
