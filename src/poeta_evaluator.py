@@ -2,6 +2,7 @@ from model_factory import get_wrapper_class
 import os
 import sys
 import json
+import glob
 import torch
 import logging
 import wandb
@@ -94,6 +95,7 @@ class IntervenedLlamaLM(BaseLM):
         batch_size: int = 1,
         activation_multipliers: Optional[Dict[str, float]] = None,
         wrapper_type: str = "llama",
+        dtype: Optional[torch.dtype] = None,
     ):
         """
         Initialize the intervened model for PoETa evaluation.
@@ -105,6 +107,7 @@ class IntervenedLlamaLM(BaseLM):
             activation_multipliers: Dict mapping 'layer_X-neuron_Y' to multiplier values
                                    for activation interventions. None for baseline.
             wrapper_type: "llama" or "gemma"
+            dtype: Model data type (e.g. torch.bfloat16). Used if wrapper_type needs it.
         """
         super().__init__()
 
@@ -117,7 +120,11 @@ class IntervenedLlamaLM(BaseLM):
         print(
             f"Activation interventions: {len(self.activation_multipliers)} neurons")
         WrapperClass = get_wrapper_class(wrapper_type)
-        self.wrapper = WrapperClass(model_name=pretrained, device=device)
+        if dtype is not None:
+            self.wrapper = WrapperClass(
+                model_name=pretrained, device=device, dtype=dtype)
+        else:
+            self.wrapper = WrapperClass(model_name=pretrained, device=device)
 
         # Get references to model and tokenizer from wrapper
         self.model = self.wrapper.model
@@ -288,6 +295,7 @@ def run_poeta_evaluation(
     description_dict_path: Optional[str] = None,
     log_to_wandb: bool = False,
     wandb_prefix: str = "",
+    dtype: Optional[torch.dtype] = None,
 ) -> Dict[str, Any]:
     """
     Run PoETa V2 benchmark evaluation on a model with optional interventions.
@@ -337,6 +345,7 @@ def run_poeta_evaluation(
         batch_size=batch_size,
         activation_multipliers=activation_multipliers,
         wrapper_type=wrapper_type,
+        dtype=dtype,
     )
 
     # Determine output directory (convert to absolute path for saving outside PoETa dir)
@@ -489,6 +498,7 @@ def compare_baseline_vs_intervened(
     output_dir: str = "runs",
     save_logs: bool = True,
     log_to_wandb: bool = False,
+    dtype: Optional[torch.dtype] = None,
 ) -> Dict[str, Any]:
     """
     Run PoETa evaluation on both baseline and intervened models, then compare.
@@ -532,6 +542,7 @@ def compare_baseline_vs_intervened(
             description_dict_path="description.json",
             log_to_wandb=log_to_wandb,
             wandb_prefix="baseline/",
+            dtype=dtype,
         )
 
         # Run intervened
@@ -549,6 +560,7 @@ def compare_baseline_vs_intervened(
             description_dict_path="description.json",
             log_to_wandb=log_to_wandb,
             wandb_prefix="intervened/",
+            dtype=dtype,
         )
 
         # Compute comparison
@@ -667,18 +679,87 @@ def compute_comparison(
     return comparison
 
 
+def _load_multipliers_from_config(cfg: DictConfig) -> tuple:
+    """
+    Load activation multipliers using the same logic as likert_scale_test.py.
+
+    Resolution order:
+      1. likert.multiplier_artifact_name (W&B artifact)
+      2. likert.activation_multipliers (inline config)
+      3. activation_multipliers (top-level config, legacy)
+
+    Args:
+        cfg: Hydra DictConfig
+
+    Returns:
+        Tuple of (activation_multipliers dict or None, source description string)
+    """
+    likert_cfg = cfg.get('likert', {})
+    if likert_cfg is None:
+        likert_cfg = {}
+
+    multiplier_artifact_name = likert_cfg.get('multiplier_artifact_name', None)
+
+    # --- Option 1: Load from W&B artifact ---
+    if multiplier_artifact_name:
+        print(f"\nFetching multiplier artifact: {multiplier_artifact_name}")
+        artifact = wandb.use_artifact(multiplier_artifact_name)
+        artifact_dir = artifact.download()
+
+        # Find optimization results JSON file
+        json_files = glob.glob(os.path.join(
+            artifact_dir, "optimization_results_*.json"))
+        if not json_files:
+            raise FileNotFoundError(
+                f"No optimization_results_*.json found in artifact: {artifact_dir}")
+
+        results_path = json_files[0]
+        with open(results_path, 'r', encoding='utf-8') as f:
+            opt_results = json.load(f)
+
+        # Extract multipliers from best trial
+        best_trial = opt_results.get('best_trial', {})
+        activation_multipliers = best_trial.get('multipliers', {})
+        print(
+            f"Loaded {len(activation_multipliers)} multipliers from artifact")
+        print(
+            f"Artifact best trial value: {best_trial.get('soft_score', 'N/A')}")
+        return activation_multipliers, f"artifact:{multiplier_artifact_name}"
+
+    # --- Option 2: Load from likert.activation_multipliers ---
+    likert_multipliers = likert_cfg.get('activation_multipliers', None)
+    if likert_multipliers is not None:
+        activation_multipliers = {str(k): float(v)
+                                  for k, v in dict(likert_multipliers).items()}
+        return activation_multipliers, "likert.activation_multipliers"
+
+    # --- Option 3: Load from top-level activation_multipliers (legacy) ---
+    if cfg.get('activation_multipliers'):
+        activation_multipliers = OmegaConf.to_container(
+            cfg.activation_multipliers)
+        return activation_multipliers, "activation_multipliers"
+
+    return None, "none"
+
+
 # Hydra configuration for running from command line
 @hydra.main(config_path="../config", config_name="poeta_eval", version_base=None)
 def main(cfg: DictConfig):
     """
     Main entry point for Hydra-based PoETa evaluation.
 
+    Supports unified config files (e.g. gemma-3-4b.yaml) where intervention
+    multipliers are loaded from likert.multiplier_artifact_name or
+    likert.activation_multipliers, following the same logic as likert_scale_test.py.
+
     Config should contain:
-        - model_name: HuggingFace model path
+        - model / model_name: HuggingFace model path
         - tasks: List of task names or 'all'
         - num_fewshot: Number of few-shot examples
         - limit: Example limit (null for full evaluation)
-        - activation_multipliers: Dict of interventions (null for baseline)
+        - likert.multiplier_artifact_name: W&B artifact with optimized multipliers
+        - likert.activation_multipliers: Inline multipliers dict
+        - activation_multipliers: Legacy inline multipliers dict
         - compare_baseline: Whether to run comparison mode
         - output_dir: Where to save results
     """
@@ -693,26 +774,67 @@ def main(cfg: DictConfig):
 
     log_to_wandb = wandb_cfg.get('log_to_wandb', False)
 
-    if log_to_wandb:
-        wandb.init(
-            project=wandb_cfg.get('project', 'poeta-evaluation'),
-            entity=wandb_cfg.get('entity', None),
-            name=wandb_cfg.get('run_name', None),
-            tags=list(wandb_cfg.get('tags', [])),
-            config=OmegaConf.to_container(cfg, resolve=True)
-        )
-
-    # Convert OmegaConf to dict for activation_multipliers
-    activation_multipliers = None
-    if cfg.get('activation_multipliers'):
-        activation_multipliers = OmegaConf.to_container(
-            cfg.activation_multipliers)
-
     # Get model configuration (support both old and new config format)
     model_cfg = cfg.get('model', {})
     model_name = model_cfg.get('name', cfg.get(
         'model_name', 'meta-llama/Llama-3.1-8B-Instruct'))
     wrapper_type = model_cfg.get('wrapper', 'llama')
+
+    dtype_str = model_cfg.get('dtype', 'float16').lower()
+    dtype_map = {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }
+    dtype = dtype_map.get(dtype_str, torch.float16)
+
+    # Prepare wandb config metadata
+    likert_cfg = cfg.get('likert', {}) or {}
+    multiplier_artifact_name = likert_cfg.get('multiplier_artifact_name', None)
+
+    wandb_config = OmegaConf.to_container(cfg, resolve=True)
+    wandb_config.update({
+        'multiplier_source': 'artifact' if multiplier_artifact_name else 'config',
+        'multiplier_artifact_name': multiplier_artifact_name,
+    })
+
+    if log_to_wandb:
+        wandb.init(
+            project=wandb_cfg.get('project', 'activation-stance-classifier'),
+            entity=wandb_cfg.get('entity', None),
+            name=wandb_cfg.get('run_name', None),
+            job_type="poeta_eval",
+            tags=list(wandb_cfg.get('tags', [])),
+            config=wandb_config,
+        )
+    else:
+        # Initialize wandb in offline/disabled mode so wandb.use_artifact still works
+        # when loading multipliers from artifacts
+        if multiplier_artifact_name:
+            wandb.init(
+                project=wandb_cfg.get(
+                    'project', 'activation-stance-classifier'),
+                entity=wandb_cfg.get('entity', None),
+                name=wandb_cfg.get('run_name', None),
+                job_type="poeta_eval",
+                config=wandb_config,
+            )
+            # Override: we need wandb for artifact loading, so enable logging
+            log_to_wandb = True
+
+    # Load activation multipliers (same logic as likert_scale_test.py)
+    activation_multipliers, multiplier_source = _load_multipliers_from_config(
+        cfg)
+
+    if activation_multipliers:
+        print(
+            f"\nActivation intervention configured: {len(activation_multipliers)} neurons")
+        print(f"Multiplier source: {multiplier_source}")
+    else:
+        print("\nNo activation interventions configured (baseline mode)")
 
     # Parse tasks
     tasks_list = None
@@ -735,7 +857,21 @@ def main(cfg: DictConfig):
             output_dir=cfg.get('output_dir', 'runs'),
             save_logs=cfg.get('save_logs', True),
             log_to_wandb=log_to_wandb,
+            dtype=dtype,
         )
+
+        # Log comparison artifact to W&B
+        if log_to_wandb and wandb.run is not None:
+            run_dir = results.get('output_dir', '')
+            if run_dir:
+                _log_comparison_artifact(
+                    run_dir=run_dir,
+                    results=results,
+                    model_name=model_name,
+                    multiplier_source=multiplier_source,
+                    multiplier_artifact_name=multiplier_artifact_name,
+                    n_multipliers=len(activation_multipliers or {}),
+                )
     else:
         # Run single evaluation - follow convention: runs/date/poeta_time/
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -759,6 +895,7 @@ def main(cfg: DictConfig):
                 description_dict_path=cfg.get(
                     'description_dict_path', 'description.json'),
                 log_to_wandb=log_to_wandb,
+                dtype=dtype,
             )
 
         if cfg.get('save_logs', True):
@@ -774,8 +911,10 @@ def main(cfg: DictConfig):
         # Save config used for this run
         config_path = run_dir / "config.json"
         config_data = {
-            'model_name': cfg.get('model_name', 'meta-llama/Llama-3.1-8B-Instruct'),
+            'model_name': model_name,
             'activation_multipliers': activation_multipliers,
+            'multiplier_source': multiplier_source,
+            'multiplier_artifact_name': multiplier_artifact_name,
             'tasks': tasks_list,
             'num_fewshot': cfg.get('num_fewshot', 0),
             'limit': cfg.get('limit'),
@@ -784,7 +923,119 @@ def main(cfg: DictConfig):
         with open(config_path, 'w') as f:
             json.dump(config_data, f, indent=2)
 
+        # Log single-eval artifact to W&B
+        if log_to_wandb and wandb.run is not None:
+            _log_single_eval_artifact(
+                run_dir=str(run_dir),
+                results=results,
+                eval_type=eval_type,
+                model_name=model_name,
+                multiplier_source=multiplier_source,
+                multiplier_artifact_name=multiplier_artifact_name,
+                n_multipliers=len(activation_multipliers or {}),
+            )
+
+    # Finish W&B run
+    if wandb.run is not None:
+        wandb.finish()
+
     return results
+
+
+def _log_single_eval_artifact(
+    run_dir: str,
+    results: Dict[str, Any],
+    eval_type: str,
+    model_name: str,
+    multiplier_source: str,
+    multiplier_artifact_name: Optional[str],
+    n_multipliers: int,
+):
+    """Log a single PoETa evaluation run as a W&B artifact."""
+    artifact_name = f"poeta-{eval_type}-results"
+    artifact = wandb.Artifact(
+        name=artifact_name,
+        type="poeta-evaluation",
+        description=f"PoETa V2 evaluation results ({eval_type})",
+        metadata={
+            'model_name': model_name,
+            'eval_type': eval_type,
+            'multiplier_source': multiplier_source,
+            'multiplier_artifact_name': multiplier_artifact_name,
+            'n_multipliers': n_multipliers,
+        }
+    )
+
+    # Add all JSON files in the run directory
+    run_path = Path(run_dir)
+    for json_file in run_path.glob("*.json"):
+        artifact.add_file(str(json_file))
+    for log_file in run_path.glob("*.log"):
+        artifact.add_file(str(log_file))
+
+    wandb.log_artifact(artifact)
+    print(f"\nPoETa artifact logged to W&B: {artifact_name}")
+
+    # Log summary metrics
+    wandb.summary.update({
+        'eval_type': eval_type,
+        'model_name': model_name,
+        'n_multipliers': n_multipliers,
+        'multiplier_source': multiplier_source,
+    })
+
+
+def _log_comparison_artifact(
+    run_dir: str,
+    results: Dict[str, Any],
+    model_name: str,
+    multiplier_source: str,
+    multiplier_artifact_name: Optional[str],
+    n_multipliers: int,
+):
+    """Log a PoETa baseline vs intervened comparison as a W&B artifact."""
+    comparison = results.get('comparison', {})
+    overall_delta = comparison.get('overall', None)
+
+    artifact = wandb.Artifact(
+        name="poeta-comparison-results",
+        type="poeta-evaluation-comparison",
+        description="PoETa V2 baseline vs intervened comparison",
+        metadata={
+            'model_name': model_name,
+            'multiplier_source': multiplier_source,
+            'multiplier_artifact_name': multiplier_artifact_name,
+            'n_multipliers': n_multipliers,
+            'overall_delta': overall_delta,
+        }
+    )
+
+    # Add all files in the run directory
+    run_path = Path(run_dir)
+    for f in run_path.glob("*.json"):
+        artifact.add_file(str(f))
+    for f in run_path.glob("*.log"):
+        artifact.add_file(str(f))
+
+    wandb.log_artifact(artifact)
+    print(f"\nPoETa comparison artifact logged to W&B: poeta-comparison-results")
+
+    # Log summary metrics
+    summary = {
+        'model_name': model_name,
+        'n_multipliers': n_multipliers,
+        'multiplier_source': multiplier_source,
+    }
+    if overall_delta is not None:
+        summary['overall_delta'] = overall_delta
+
+    # Log per-task deltas to summary
+    for task, metrics in comparison.get('per_task', {}).items():
+        for metric, delta in metrics.items():
+            if isinstance(delta, (int, float)):
+                summary[f"delta/{task}/{metric}"] = delta
+
+    wandb.summary.update(summary)
 
 
 if __name__ == "__main__":
