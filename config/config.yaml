@@ -33,33 +33,24 @@ feature_selection:
   ranking_top_n: 256
   seed: 42
 
-likert:
+ipi:
   condition: baseline
   eval_split: validation
   multiplier_artifact_name: null
-  prompt_template_version: default
-  parser_version: default
+  prompt_template_version: ae_options_v1
+  parser_version: ae_options_v1
   temperature: 0
   decoding_strategy: greedy
-  # Intervention scope used during Likert generation. See
-  # `src/utils/intervention_hooks.py` for supported values. The legacy default
-  # is `prompt_without_buffer` with `intervention_last_k=3`, which reproduces
-  # the historical `buffer_size = 3` behavior. When a multipliers artifact is
-  # loaded, its metadata overrides these values.
-  intervention_scope: prompt_without_buffer
-  intervention_last_k: 3
-
-# IPI evaluation settings
-ipi_eval:
   language: "pt"
   use_chat_format: true
   max_new_tokens: 10
-  temperature: 0.0
   experiment_name: null
   activation_multipliers: null
-  # W&B artifact name for multipliers (optional, overrides activation_multipliers)
-  multiplier_artifact_name: null
-  # job_type: "likert_eval"
+  # Intervention scope used during IPI generation. See
+  # `src/utils/intervention_hooks.py`. When a multipliers artifact is loaded,
+  # its metadata overrides these values.
+  intervention_scope: prompt_without_buffer
+  intervention_last_k: 3
 
 optimization:
   direction: minimize
@@ -84,14 +75,17 @@ artifacts:
   activations_name: null
   feature_ranking_name: null
   multiplier_name: null
-  likert_baseline_name: null
-  likert_intervened_name: null
+  ipi_baseline_name: null
+  ipi_intervened_name: null
 
 pipeline:
   dry_run: false
   resume: true
   force: false
   skip_existing: true
+  # Manifest/summary root is runs/<runs_subdir>/ (default: pipeline). Overridden by
+  # experiment.runs_subdir when set in an experiment config.
+  runs_subdir: null
 
 # Hydra output directory
 hydra:

@@ -14,7 +14,7 @@ extraction:
   device: "cuda"
   max_length: 1024
 
-ipi_eval:
+ipi:
   use_chat_format: True
   multiplier_artifact_name: "ebouhid-unicamp/LLM-Lobotomy/Llama-3.1-8B-Instruct_signed_minimize_multipliers:latest"
 

@@ -1,6 +1,7 @@
 name: scope_ablation
 split_id: three_way_plus_holdout_v1
 seed: 42
+runs_subdir: null
 
 models:
   - gemma-3-4b
@@ -33,6 +34,6 @@ stages:
   extract_activations: true
   feature_selection: true
   optimization: true
-  likert_baseline: true
-  likert_intervened: true
+  ipi_baseline: true
+  ipi_intervened: true
   poeta: false

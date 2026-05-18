@@ -12,7 +12,7 @@ from omegaconf import DictConfig
 from utils.experiment_ids import (
     make_activation_artifact_name,
     make_feature_ranking_artifact_name,
-    make_likert_artifact_name,
+    make_ipi_artifact_name,
     make_multiplier_artifact_name,
     make_run_id,
 )
@@ -41,7 +41,7 @@ def _build_commands(
     top_k: int,
     n_trials: int,
     stages: DictConfig,
-    include_baseline_likert: bool,
+    include_baseline_ipi: bool,
     artifact_names: dict[str, str],
     intervention_scope: str,
     intervention_last_k: int,
@@ -53,14 +53,14 @@ def _build_commands(
     needs to guess (and stale defaults in config/model/*.yaml cannot leak in).
 
     `artifact_names` keys: activations, feature_ranking, multipliers,
-    likert_baseline, likert_intervened. Values are bare names (no
+    ipi_baseline, ipi_intervened. Values are bare names (no
     entity/project prefix) — wandb resolves them in the active run's project.
     """
     activations_name = artifact_names["activations"]
     feature_ranking_name = artifact_names["feature_ranking"]
     multipliers_name = artifact_names["multipliers"]
-    likert_baseline_name = artifact_names["likert_baseline"]
-    likert_intervened_name = artifact_names["likert_intervened"]
+    ipi_baseline_name = artifact_names["ipi_baseline"]
+    ipi_intervened_name = artifact_names["ipi_intervened"]
 
     activations_ref = f"{activations_name}:latest"
     feature_ranking_ref = f"{feature_ranking_name}:latest"
@@ -92,28 +92,25 @@ def _build_commands(
             f"optimization.feature_artifact_name={feature_ranking_ref} "
             f"artifacts.multiplier_name={multipliers_name}"
         )
-    if stages.get("likert_baseline", False) and include_baseline_likert:
-        # Baseline must NOT load a multiplier artifact; null wins over any
-        # leftover model-config default. Scope is irrelevant for baseline
-        # generation (no hooks) but we still pass it for log consistency.
+    if stages.get("ipi_baseline", False) and include_baseline_ipi:
         cmds.append(
-            "python src/likert_scale_test.py "
-            f"model={model_cfg_name} likert.condition=baseline "
-            "ipi_eval.multiplier_artifact_name=null "
-            f"likert.intervention_scope={intervention_scope} "
-            f"likert.intervention_last_k={intervention_last_k} "
-            f"artifacts.likert_baseline_name={likert_baseline_name}"
+            "python src/ipi_eval.py "
+            f"model={model_cfg_name} ipi.condition=baseline "
+            "ipi.multiplier_artifact_name=null "
+            f"ipi.intervention_scope={intervention_scope} "
+            f"ipi.intervention_last_k={intervention_last_k} "
+            f"artifacts.ipi_baseline_name={ipi_baseline_name}"
         )
-    if stages.get("likert_intervened", False):
+    if stages.get("ipi_intervened", False):
         cmds.append(
-            "python src/likert_scale_test.py "
-            f"model={model_cfg_name} likert.condition=intervened "
+            "python src/ipi_eval.py "
+            f"model={model_cfg_name} ipi.condition=intervened "
             f"optimization.direction={direction} optimization.top_k={top_k} "
             f"optimization.n_trials={n_trials} "
-            f"likert.intervention_scope={intervention_scope} "
-            f"likert.intervention_last_k={intervention_last_k} "
-            f"ipi_eval.multiplier_artifact_name={multipliers_ref} "
-            f"artifacts.likert_intervened_name={likert_intervened_name}"
+            f"ipi.intervention_scope={intervention_scope} "
+            f"ipi.intervention_last_k={intervention_last_k} "
+            f"ipi.multiplier_artifact_name={multipliers_ref} "
+            f"artifacts.ipi_intervened_name={ipi_intervened_name}"
         )
     if stages.get("poeta", False):
         cmds.append(f"python src/poeta_evaluator.py model={model_cfg_name}")
@@ -233,6 +230,26 @@ def _resolve_completion_metrics(
     return base
 
 
+_DEFAULT_RUNS_SUBDIR = "pipeline"
+
+
+def _resolve_runs_subdir(experiment: DictConfig, pipeline_cfg: Any) -> str:
+    """Return the runs/ subdirectory name for pipeline manifests."""
+    raw = experiment.get("runs_subdir")
+    if raw is None and pipeline_cfg is not None:
+        raw = pipeline_cfg.get("runs_subdir")
+    if raw is None:
+        return _DEFAULT_RUNS_SUBDIR
+    name = str(raw).strip()
+    if not name:
+        raise ValueError("runs_subdir must be a non-empty string when set.")
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError(
+            f"runs_subdir must be a single directory name under runs/, got {name!r}."
+        )
+    return name
+
+
 def _baseline_reuse_key(
     model_cfg_name: str,
     split_id: str,
@@ -243,22 +260,22 @@ def _baseline_reuse_key(
     Build the baseline reuse key from settings that define baseline equivalence.
 
     Intervention scope is intentionally NOT part of this key because the
-    baseline Likert run does not apply any multipliers (no hooks registered);
+    baseline IPI run does not apply any multipliers (no hooks registered);
     the same baseline output is reusable across all scope variants.
     """
-    likert_cfg = cfg.get("likert", {})
+    ipi_cfg = cfg.get("ipi", {}) or {}
     data_cfg = cfg.get("data", {})
     validation_dataset = data_cfg.get("validation_dataset")
     if not validation_dataset:
-        raise ValueError("data.validation_dataset must be set for pipeline Likert planning.")
+        raise ValueError("data.validation_dataset must be set for pipeline IPI planning.")
     return (
         model_cfg_name,
         split_id,
         str(validation_dataset),
-        str(likert_cfg.get("prompt_template_version", "default")),
-        str(likert_cfg.get("parser_version", "default")),
-        float(likert_cfg.get("temperature", 0)),
-        str(likert_cfg.get("decoding_strategy", "greedy")),
+        str(ipi_cfg.get("prompt_template_version", "default")),
+        str(ipi_cfg.get("parser_version", "default")),
+        float(ipi_cfg.get("temperature", 0)),
+        str(ipi_cfg.get("decoding_strategy", "greedy")),
         int(seed),
     )
 
@@ -297,7 +314,8 @@ def main(cfg: DictConfig) -> None:
             f"experiment.intervention_last_k must be >= 0, got {intervention_last_k!r}."
         )
 
-    output_root = Path("runs/pipeline")
+    runs_subdir = _resolve_runs_subdir(experiment, cfg.get("pipeline"))
+    output_root = Path("runs") / runs_subdir
     output_root.mkdir(parents=True, exist_ok=True)
     dry_run = bool(cfg.pipeline.get("dry_run", True))
     project_root = Path(hydra.utils.get_original_cwd())
@@ -308,6 +326,7 @@ def main(cfg: DictConfig) -> None:
 
     print("=" * 70)
     print(f"PIPELINE PLAN: {experiment.name}")
+    print(f"runs_subdir={runs_subdir} (manifests under {output_root}/)")
     print(f"dry_run={dry_run}")
     print(f"resume={cfg.pipeline.get('resume', True)} force={cfg.pipeline.get('force', False)}")
     print(f"skip_existing={cfg.pipeline.get('skip_existing', True)}")
@@ -353,7 +372,7 @@ def main(cfg: DictConfig) -> None:
                             seed=seed,
                             cfg=cfg,
                         )
-                        include_baseline_likert = baseline_key not in scheduled_baseline_keys
+                        include_baseline_ipi = baseline_key not in scheduled_baseline_keys
 
                         if _should_skip_existing(previous_status, resume, force, skip_existing):
                             skipped_count += 1
@@ -386,13 +405,13 @@ def main(cfg: DictConfig) -> None:
                                     scope=scope,
                                     last_k=intervention_last_k,
                                 ),
-                                "likert_baseline": make_likert_artifact_name(
+                                "ipi_baseline": make_ipi_artifact_name(
                                     model_name=model_cfg_name,
                                     split_id=split_id,
                                     condition="baseline",
                                     seed=seed,
                                 ),
-                                "likert_intervened": make_likert_artifact_name(
+                                "ipi_intervened": make_ipi_artifact_name(
                                     model_name=model_cfg_name,
                                     split_id=split_id,
                                     condition="intervened",
@@ -411,7 +430,7 @@ def main(cfg: DictConfig) -> None:
                                 top_k=top_k,
                                 n_trials=n_trials,
                                 stages=experiment.stages,
-                                include_baseline_likert=include_baseline_likert,
+                                include_baseline_ipi=include_baseline_ipi,
                                 artifact_names=artifact_names,
                                 intervention_scope=scope,
                                 intervention_last_k=intervention_last_k,
@@ -441,10 +460,10 @@ def main(cfg: DictConfig) -> None:
                             for cmd in commands:
                                 print(f"  - {cmd}")
                             print(f"  manifest: {manifest_path}")
-                            if include_baseline_likert and experiment.stages.get("likert_baseline", False):
+                            if include_baseline_ipi and experiment.stages.get("ipi_baseline", False):
                                 scheduled_baseline_keys.add(baseline_key)
                             else:
-                                print("  baseline likert: reused (not rescheduled)")
+                                print("  baseline IPI: reused (not rescheduled)")
 
                             if not dry_run:
                                 _execute_job_commands(

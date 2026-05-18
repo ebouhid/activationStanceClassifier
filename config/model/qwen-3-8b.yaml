@@ -11,7 +11,7 @@ extraction:
   device: "cuda"
   max_length: 1024
 
-ipi_eval:
+ipi:
   use_chat_format: true
 
 optimization:

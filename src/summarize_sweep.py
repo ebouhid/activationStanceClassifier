@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 from pathlib import Path
 from typing import Any
+
+_DEFAULT_PIPELINE_DIR = "runs/pipeline"
 
 
 SUMMARY_COLUMNS = [
@@ -21,8 +24,8 @@ SUMMARY_COLUMNS = [
     "activation_artifact",
     "feature_ranking_artifact",
     "multiplier_artifact",
-    "likert_baseline_artifact",
-    "likert_intervened_artifact",
+    "ipi_baseline_artifact",
+    "ipi_intervened_artifact",
     "soft_ipi_optimization_baseline",
     "soft_ipi_optimization_intervened",
     "delta_soft_ipi_optimization",
@@ -76,8 +79,8 @@ def _flatten_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         "activation_artifact": artifacts.get("activations"),
         "feature_ranking_artifact": artifacts.get("feature_ranking"),
         "multiplier_artifact": artifacts.get("multipliers"),
-        "likert_baseline_artifact": artifacts.get("likert_baseline"),
-        "likert_intervened_artifact": artifacts.get("likert_intervened"),
+        "ipi_baseline_artifact": artifacts.get("ipi_baseline"),
+        "ipi_intervened_artifact": artifacts.get("ipi_intervened"),
         "soft_ipi_optimization_baseline": metrics.get("soft_ipi_optimization_baseline"),
         "soft_ipi_optimization_intervened": metrics.get("soft_ipi_optimization_intervened"),
         "delta_soft_ipi_optimization": metrics.get("delta_soft_ipi_optimization"),
@@ -129,7 +132,7 @@ def _write_markdown(rows: list[dict[str, Any]], md_path: Path) -> None:
     lines.append("")
 
     if not rows:
-        lines.append("No manifests found under `runs/pipeline/*/manifest.json`.")
+        lines.append("No manifests found.")
     else:
         lines.append("| " + " | ".join(SUMMARY_COLUMNS) + " |")
         lines.append("| " + " | ".join(["---"] * len(SUMMARY_COLUMNS)) + " |")
@@ -140,9 +143,32 @@ def _write_markdown(rows: list[dict[str, Any]], md_path: Path) -> None:
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Aggregate pipeline manifests into summary.csv and summary.md."
+    )
+    parser.add_argument(
+        "--pipeline-dir",
+        default=_DEFAULT_PIPELINE_DIR,
+        help=(
+            "Directory containing <run_id>/manifest.json entries "
+            f"(default: {_DEFAULT_PIPELINE_DIR})."
+        ),
+    )
+    return parser.parse_args()
+
+
+def _resolve_pipeline_dir(project_root: Path, pipeline_dir_arg: str) -> Path:
+    pipeline_dir = Path(pipeline_dir_arg)
+    if not pipeline_dir.is_absolute():
+        pipeline_dir = project_root / pipeline_dir
+    return pipeline_dir.resolve()
+
+
 def main() -> None:
+    args = _parse_args()
     project_root = Path(__file__).resolve().parent.parent
-    pipeline_dir = project_root / "runs" / "pipeline"
+    pipeline_dir = _resolve_pipeline_dir(project_root, args.pipeline_dir)
     pipeline_dir.mkdir(parents=True, exist_ok=True)
 
     rows = _read_manifests(pipeline_dir)
@@ -153,6 +179,7 @@ def main() -> None:
     _write_csv(rows, csv_path)
     _write_markdown(rows, md_path)
 
+    print(f"Pipeline dir: {pipeline_dir}")
     print(f"Manifests scanned: {len(rows)}")
     print(f"CSV written: {csv_path}")
     print(f"Markdown written: {md_path}")

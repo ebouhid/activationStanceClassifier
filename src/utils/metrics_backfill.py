@@ -117,25 +117,27 @@ def _select_latest_run(runs: list[Any]) -> Any | None:
     return sorted(runs, key=_sort_key, reverse=True)[0]
 
 
-def _likert_eval_split(run: Any) -> str:
-    """Classify which IPI split a Likert run evaluated."""
+def _ipi_eval_split(run: Any) -> str:
+    """Classify which IPI split an IPI evaluation run used."""
     summary = dict(getattr(run, "summary", {}) or {})
-    summary_split = summary.get("likert_eval_split")
-    if summary_split in {"validation", "holdout_test"}:
-        return str(summary_split)
+    for key in ("ipi_eval_split", "likert_eval_split"):
+        summary_split = summary.get(key)
+        if summary_split in {"validation", "holdout_test"}:
+            return str(summary_split)
 
     config = dict(getattr(run, "config", {}) or {})
-    likert_cfg = config.get("likert") or {}
-    if isinstance(likert_cfg, dict):
-        cfg_split = likert_cfg.get("eval_split")
-        if cfg_split in {"validation", "holdout_test"}:
-            return str(cfg_split)
+    for cfg_key in ("ipi", "likert"):
+        ipi_cfg = config.get(cfg_key) or {}
+        if isinstance(ipi_cfg, dict):
+            cfg_split = ipi_cfg.get("eval_split")
+            if cfg_split in {"validation", "holdout_test"}:
+                return str(cfg_split)
 
     data_cfg = config.get("data") or {}
     if not isinstance(data_cfg, dict):
         data_cfg = {}
 
-    eval_dataset = summary.get("likert_eval_dataset")
+    eval_dataset = summary.get("ipi_eval_dataset") or summary.get("likert_eval_dataset")
     if eval_dataset is None:
         return "unknown"
 
@@ -234,6 +236,7 @@ def _fetch_likert_metrics(
     filters = {
         "$or": [
             {"config.multiplier_artifact_name": multipliers_ref},
+            {"config.ipi.multiplier_artifact_name": multipliers_ref},
             {"config.ipi_eval.multiplier_artifact_name": multipliers_ref},
         ]
     }
@@ -250,7 +253,7 @@ def _fetch_likert_metrics(
         return _empty_likert_metrics()
 
     summary = dict(getattr(run, "summary", {}) or {})
-    eval_split = _likert_eval_split(run)
+    eval_split = _ipi_eval_split(run)
     return _map_likert_summary_to_metrics(summary, eval_split=eval_split)
 
 

@@ -15,7 +15,7 @@ extraction:
   max_length: 1024
 
 
-ipi_eval:
+ipi:
   multiplier_artifact_name: "ebouhid-unicamp/LLM-Lobotomy/Phi-3-mini-4k-instruct_signed_minimize_multipliers:latest"
   use_chat_format: True
 

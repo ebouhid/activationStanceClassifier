@@ -1,6 +1,8 @@
 name: k80_trials
-split_id: three_way_split_v1
+split_id: three_way_plus_holdout_v1
 seed: 42
+# Manifest root: runs/<runs_subdir>/ (default pipeline when null).
+runs_subdir: null
 
 models:
   - gemma-3-4b
@@ -15,9 +17,9 @@ trial_grid:
   "80": [500, 1500, 3000]
 
 stages:
-  extract_activations: true
-  feature_selection: true
+  extract_activations: false
+  feature_selection: false
   optimization: true
-  likert_baseline: true
-  likert_intervened: true
+  ipi_baseline: true
+  ipi_intervened: true
   poeta: false

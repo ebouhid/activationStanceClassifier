@@ -78,7 +78,7 @@ def make_multiplier_artifact_name(
     )
 
 
-def make_likert_artifact_name(
+def make_ipi_artifact_name(
     model_name: str,
     split_id: str,
     condition: str,
@@ -91,17 +91,14 @@ def make_likert_artifact_name(
 ) -> str:
     condition_norm = _normalize(condition)
     if condition_norm == "baseline":
-        # Baseline never sees the intervention, so scope is intentionally
-        # excluded from the baseline artifact name — preserves baseline reuse
-        # across scope variants.
-        return f"likert-baseline-{_normalize(model_name)}-{_normalize(split_id)}-seed{int(seed)}"
+        return f"ipi-baseline-{_normalize(model_name)}-{_normalize(split_id)}-seed{int(seed)}"
     if condition_norm == "intervened":
         if direction is None or top_k is None or n_trials is None:
             raise ValueError(
-                "Intervened likert artifact name requires direction, top_k, and n_trials."
+                "Intervened IPI artifact name requires direction, top_k, and n_trials."
             )
         return (
-            f"likert-intervened-{_normalize(model_name)}-{_normalize(split_id)}-"
+            f"ipi-intervened-{_normalize(model_name)}-{_normalize(split_id)}-"
             f"{_normalize(direction)}-k{int(top_k)}-trials{int(n_trials)}-seed{int(seed)}"
             f"{scope_identity_suffix(scope, last_k)}"
         )
@@ -168,13 +165,13 @@ if __name__ == "__main__":
             scope="prompt_last_token",
             last_k=3,
         ),
-        "likert_baseline": make_likert_artifact_name(
+        "ipi_baseline": make_ipi_artifact_name(
             model_name="gemma-3-4b",
             split_id="three_way_split_v1",
             condition="baseline",
             seed=42,
         ),
-        "likert_intervened": make_likert_artifact_name(
+        "ipi_intervened": make_ipi_artifact_name(
             model_name="gemma-3-4b",
             split_id="three_way_split_v1",
             condition="intervened",
@@ -183,7 +180,7 @@ if __name__ == "__main__":
             n_trials=3000,
             seed=42,
         ),
-        "likert_intervened_with_scope": make_likert_artifact_name(
+        "ipi_intervened_with_scope": make_ipi_artifact_name(
             model_name="gemma-3-4b",
             split_id="three_way_split_v1",
             condition="intervened",
