@@ -14,13 +14,13 @@ from datetime import datetime
 import wandb
 
 from model_factory import get_model_wrapper
-from likert_scale_test import (
-    run_likert_test_streaming,
+from ipi_eval import (
+    run_ipi_test_streaming,
     compute_kl_divergence,
-    LIKERT_SCALE,
-    create_likert_prompt,
-    format_chat_prompt
+    create_ipi_prompt,
+    format_chat_prompt,
 )
+from utils.ipi_surrogate import discover_option_token_ids
 from utils.experiment_ids import make_multiplier_artifact_name, scope_identity_suffix
 from utils.intervention_hooks import (
     DEFAULT_LAST_K,
@@ -156,8 +156,7 @@ def soft_objective(
     questions_df: pd.DataFrame,
     target_neurons: List[str],
     bounds: Tuple[float, float],
-    positive_token_id: int,
-    negative_token_id: int,
+    option_token_ids: dict[int, list[int]],
     language: str = "pt",
     use_absolute: bool = False,
     direction: str = "maximize",
@@ -165,31 +164,11 @@ def soft_objective(
     last_k: int = DEFAULT_LAST_K,
 ) -> float:
     """
-    Soft objective function using logit differences instead of discrete PI.
+    Soft IPI objective using expected IPI over A–E option letters.
 
-    This provides a continuous gradient signal to the optimizer by computing
-    the probability gap between "Agree" and "Disagree" tokens at the first
-    response position.
-
-    The soft metric for each pair is:
-        pair_diff = soft_score(P+) - soft_score(P-)
-
-    where soft_score = P("Concordo") - P("Discordo") at the first token position.
-
-    Args:
-        trial: Optuna trial object
-        wrapper: LLaMA model wrapper
-        questions_df: DataFrame with Likert questions (must have 'pergunta', 'pair_id', 'tipo_pergunta')
-        target_neurons: List of neuron identifiers to optimize
-        bounds: Multiplier bounds (min, max)
-        positive_token_id: Token ID for positive stance word ("Concordo"/"Agree")
-        negative_token_id: Token ID for negative stance word ("Discordo"/"Disagree")
-        language: Prompt language
-        use_absolute: If True, return abs(avg_signed_pi) instead of the signed value
-        direction: Optimization direction ('maximize' or 'minimize')
-
-    Returns:
-        Average soft PI (signed or absolute depending on use_absolute)
+    For each question, expected_ipi in [-2, 2] is computed from next-token
+    logits via logsumexp over letter variants, then softmax across options.
+    Pair soft IPI = expected_ipi(P+) - expected_ipi(P-).
     """
     # Build multipliers from trial suggestions
     multipliers = build_multipliers_from_trial(trial, target_neurons, bounds)
@@ -213,7 +192,7 @@ def soft_objective(
             tipo = row['tipo_pergunta']
 
             # Create and format prompt
-            user_message = create_likert_prompt(statement, language)
+            user_message = create_ipi_prompt(statement, language)
             prompt = format_chat_prompt(
                 wrapper.model.tokenizer, user_message, language)
 
@@ -235,12 +214,10 @@ def soft_objective(
                 raise TypeError(
                     f"Expected input_ids to be torch.Tensor, got {type(input_ids).__name__}")
 
-            soft_score, prob_sum = wrapper.get_soft_stance_score(
+            soft_score = wrapper.get_expected_ipi_score(
                 input_ids=input_ids,
+                option_token_ids=option_token_ids,
                 activation_multipliers=multipliers,
-                positive_token_id=positive_token_id,
-                negative_token_id=negative_token_id,
-                language=language,
                 intervention_scope=intervention_scope,
                 last_k=last_k,
             )
@@ -318,7 +295,7 @@ def objective(
     intervention_scores = []
 
     # Stream through question pairs
-    pair_generator = run_likert_test_streaming(
+    pair_generator = run_ipi_test_streaming(
         wrapper=wrapper,
         questions_df=questions_df,
         language=language,
@@ -376,7 +353,7 @@ def run_baseline(
     baseline_scores = []
     pair_results = []
 
-    for pair_result in run_likert_test_streaming(
+    for pair_result in run_ipi_test_streaming(
         wrapper=wrapper,
         questions_df=questions_df,
         language=language,
@@ -597,10 +574,9 @@ def print_best_soft_trial(
 
 
 def compute_soft_scores(
-    wrapper,  # Llama3dot1Wrapper or Gemma3Wrapper
+    wrapper,
     questions_df: pd.DataFrame,
-    positive_token_id: int,
-    negative_token_id: int,
+    option_token_ids: dict[int, list[int]],
     language: str = "pt",
     activation_multipliers: Optional[Dict[str, float]] = None,
     label: str = "score",
@@ -629,7 +605,7 @@ def compute_soft_scores(
             statement = row['pergunta']
             tipo = row['tipo_pergunta']
 
-            user_message = create_likert_prompt(statement, language)
+            user_message = create_ipi_prompt(statement, language)
             prompt = format_chat_prompt(
                 wrapper.model.tokenizer, user_message, language)
 
@@ -649,12 +625,10 @@ def compute_soft_scores(
                 raise TypeError(
                     f"Expected input_ids to be torch.Tensor, got {type(input_ids).__name__}")
 
-            soft_score, _ = wrapper.get_soft_stance_score(
+            soft_score = wrapper.get_expected_ipi_score(
                 input_ids=input_ids,
+                option_token_ids=option_token_ids,
                 activation_multipliers=activation_multipliers,
-                positive_token_id=positive_token_id,
-                negative_token_id=negative_token_id,
-                language=language,
                 intervention_scope=intervention_scope,
                 last_k=last_k,
             )
@@ -694,7 +668,7 @@ def main(cfg: DictConfig):
     with OutputLogger(log_path):
         # Extract configuration
         opt_cfg = cfg.optimization
-        ipi_eval_cfg = cfg.ipi_eval
+        ipi_cfg = cfg.get("ipi", {}) or {}
 
         # W&B configuration
         wandb_cfg = cfg.get('wandb', {})
@@ -811,13 +785,13 @@ def main(cfg: DictConfig):
             f"Invalid direction '{direction}'. Must be 'maximize' or 'minimize'."
 
         # Language setting
-        language = ipi_eval_cfg.get('language', 'pt')
+        language = ipi_cfg.get('language', 'pt')
 
         print("=" * 70)
-        print("NEURON INTERVENTION OPTIMIZATION (SOFT METRIC)")
+        print("NEURON INTERVENTION OPTIMIZATION (EXPECTED IPI SURROGATE)")
         print("=" * 70)
         print(f"\nSeed: {seed}")
-        print(f"\nOptimization Mode: Soft Metric (logit difference)")
+        print(f"\nOptimization Mode: Expected IPI over A–E options")
         print(f"  - Objective mode: {objective_mode}")
         print(f"  - Direction: {direction}")
         if use_absolute:
@@ -865,30 +839,33 @@ def main(cfg: DictConfig):
         wrapper = get_model_wrapper(cfg)
         print(f"Loaded model: {wrapper.model.cfg.model_name}")
 
-        # Get stance token IDs for soft metric
-        positive_token_id, negative_token_id = wrapper.get_stance_token_ids(
-            language)
-        print(f"\nStance token IDs ({language}):")
-        print(f"  Positive ('Concordo'/'Agree'): {positive_token_id}")
-        print(f"  Negative ('Discordo'/'Disagree'): {negative_token_id}")
-
-        # Verify tokens decode correctly
         if wrapper.model.tokenizer is None:
             raise RuntimeError(
                 "Tokenizer is not initialized in the model wrapper")
 
-        pos_decoded = wrapper.model.tokenizer.decode([positive_token_id])
-        neg_decoded = wrapper.model.tokenizer.decode([negative_token_id])
-        print(f"  Positive decodes to: '{pos_decoded}'")
-        print(f"  Negative decodes to: '{neg_decoded}'")
+        sample_statement = str(optim_questions_df.iloc[0]["pergunta"])
+        sample_user_message = create_ipi_prompt(sample_statement, language)
+        sample_prompt = format_chat_prompt(
+            wrapper.model.tokenizer, sample_user_message, language
+        )
+        option_token_ids = discover_option_token_ids(
+            wrapper.model.tokenizer, sample_prompt
+        )
+        print(f"\nA–E option token IDs ({language}):")
+        for score in sorted(option_token_ids):
+            decoded = [
+                wrapper.model.tokenizer.decode([tid])
+                for tid in option_token_ids[score]
+            ]
+            print(f"  score {score:+d}: ids={option_token_ids[score]} -> {decoded}")
 
         # Run baseline evaluation (discrete PI for final validation reference)
         baseline_scores, baseline_pi = run_baseline(
             wrapper=wrapper,
             questions_df=eval_questions_df,
             language=language,
-            max_new_tokens=ipi_eval_cfg.get('max_new_tokens', 10),
-            temperature=ipi_eval_cfg.get('temperature', 0.0)
+            max_new_tokens=ipi_cfg.get('max_new_tokens', 10),
+            temperature=ipi_cfg.get('temperature', 0.0)
         )
 
         # Compute baseline soft scores on optimization and validation datasets.
@@ -897,8 +874,7 @@ def main(cfg: DictConfig):
         baseline_opt_signed_soft, baseline_opt_abs_soft = compute_soft_scores(
             wrapper=wrapper,
             questions_df=optim_questions_df,
-            positive_token_id=positive_token_id,
-            negative_token_id=negative_token_id,
+            option_token_ids=option_token_ids,
             language=language,
             activation_multipliers=None,
             label="Optimization baseline",
@@ -908,8 +884,7 @@ def main(cfg: DictConfig):
         baseline_val_signed_soft, baseline_val_abs_soft = compute_soft_scores(
             wrapper=wrapper,
             questions_df=eval_questions_df,
-            positive_token_id=positive_token_id,
-            negative_token_id=negative_token_id,
+            option_token_ids=option_token_ids,
             language=language,
             activation_multipliers=None,
             label="Validation baseline",
@@ -965,8 +940,7 @@ def main(cfg: DictConfig):
                 questions_df=optim_questions_df,
                 target_neurons=target_neurons,
                 bounds=bounds,
-                positive_token_id=positive_token_id,
-                negative_token_id=negative_token_id,
+                option_token_ids=option_token_ids,
                 language=language,
                 use_absolute=use_absolute,
                 intervention_scope=intervention_scope,
@@ -985,8 +959,7 @@ def main(cfg: DictConfig):
         optim_intervened_signed, optim_intervened_abs = compute_soft_scores(
             wrapper=wrapper,
             questions_df=optim_questions_df,
-            positive_token_id=positive_token_id,
-            negative_token_id=negative_token_id,
+            option_token_ids=option_token_ids,
             language=language,
             activation_multipliers=best_multipliers,
             label="Optimization intervened",
@@ -996,8 +969,7 @@ def main(cfg: DictConfig):
         val_intervened_signed, val_intervened_abs = compute_soft_scores(
             wrapper=wrapper,
             questions_df=eval_questions_df,
-            positive_token_id=positive_token_id,
-            negative_token_id=negative_token_id,
+            option_token_ids=option_token_ids,
             language=language,
             activation_multipliers=best_multipliers,
             label="Validation intervened",
@@ -1111,6 +1083,7 @@ def main(cfg: DictConfig):
                 'n_target_neurons': len(target_neurons),
                 'intervention_scope': intervention_scope,
                 'intervention_last_k': intervention_last_k,
+                'surrogate': 'expected_ipi_ae',
                 **soft_metrics,
             }
         )
@@ -1160,7 +1133,7 @@ def main(cfg: DictConfig):
             print("The optimizer used |soft PI| - direction may be left OR right.")
         else:
             print(f"The optimizer {direction}d the signed soft PI.")
-        print("To validate the real-world PI, run likert_scale_test.py")
+        print("To validate discrete IPI, run: python src/ipi_eval.py model=<name>")
         print("with the best multipliers from above.")
 
         # Finish W&B run

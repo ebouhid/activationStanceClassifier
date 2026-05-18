@@ -274,3 +274,22 @@ class Mistral7BWrapper:
         p_neg = probs[negative_token_id].item()
 
         return p_pos - p_neg, p_pos + p_neg
+
+    def get_expected_ipi_score(
+        self,
+        input_ids: torch.Tensor,
+        option_token_ids: dict[int, list[int]],
+        activation_multipliers: Optional[Dict[str, float]] = None,
+        intervention_scope: str = DEFAULT_SCOPE,
+        last_k: int = DEFAULT_LAST_K,
+    ) -> float:
+        from utils.ipi_surrogate import get_expected_ipi_score
+
+        return get_expected_ipi_score(
+            wrapper=self,
+            input_ids=input_ids,
+            option_token_ids=option_token_ids,
+            activation_multipliers=activation_multipliers,
+            intervention_scope=intervention_scope,
+            last_k=last_k,
+        )
