@@ -497,11 +497,11 @@ def run_poeta_evaluation(
 
 def _load_multipliers_from_config(cfg: DictConfig) -> Tuple[Optional[Dict[str, float]], Dict[str, Any]]:
     """
-    Load activation multipliers using the same logic as likert_scale_test.py.
+    Load activation multipliers using the same logic as ipi_eval.py.
 
     Resolution order:
-      1. likert.multiplier_artifact_name (W&B artifact)
-      2. likert.activation_multipliers (inline config)
+      1. ipi.multiplier_artifact_name (W&B artifact)
+      2. ipi.activation_multipliers (inline config)
       3. activation_multipliers (top-level config, legacy)
 
     Args:
@@ -512,17 +512,14 @@ def _load_multipliers_from_config(cfg: DictConfig) -> Tuple[Optional[Dict[str, f
           - activation_multipliers dict or None
           - provenance metadata dict with source/artifact_name/variant
     """
-    ipi_eval_cfg = cfg.get('likert', {})
-    if ipi_eval_cfg is None:
-        ipi_eval_cfg = {}
+    ipi_cfg = cfg.get('ipi', {}) or cfg.get('likert', {}) or {}
 
     evaluation_variant = str(
         cfg.get('evaluation_variant', '') or '').strip().lower()
     if evaluation_variant not in {"baseline", "maximize", "minimize"}:
         evaluation_variant = "baseline"
 
-    multiplier_artifact_name = ipi_eval_cfg.get(
-        'multiplier_artifact_name', None)
+    multiplier_artifact_name = ipi_cfg.get('multiplier_artifact_name', None)
 
     provenance = {
         "source": "none",
@@ -560,12 +557,11 @@ def _load_multipliers_from_config(cfg: DictConfig) -> Tuple[Optional[Dict[str, f
         provenance["source"] = "artifact"
         return activation_multipliers, provenance
 
-    # --- Option 2: Load from likert.activation_multipliers ---
-    likert_multipliers = ipi_eval_cfg.get('activation_multipliers', None)
-    if likert_multipliers is not None:
+    inline_multipliers = ipi_cfg.get('activation_multipliers', None)
+    if inline_multipliers is not None:
         activation_multipliers = {str(k): float(v)
-                                  for k, v in dict(likert_multipliers).items()}
-        provenance["source"] = "likert.activation_multipliers"
+                                  for k, v in dict(inline_multipliers).items()}
+        provenance["source"] = "ipi.activation_multipliers"
         return activation_multipliers, provenance
 
     # --- Option 3: Load from top-level activation_multipliers (legacy) ---
@@ -585,8 +581,8 @@ def main(cfg: DictConfig):
     Main entry point for Hydra-based PoETa evaluation.
 
     Supports unified config files (e.g. gemma-3-4b.yaml) where intervention
-    multipliers are loaded from likert.multiplier_artifact_name or
-    likert.activation_multipliers, following the same logic as likert_scale_test.py.
+    multipliers are loaded from ipi.multiplier_artifact_name or
+    ipi.activation_multipliers, following the same logic as ipi_eval.py.
 
     Config should contain:
         - model / model_name: HuggingFace model path
@@ -595,8 +591,8 @@ def main(cfg: DictConfig):
         - poeta.limit: Example limit (null for full evaluation)
         - poeta.output_dir: Where to save results
         - poeta.batch_size / poeta.device / poeta.prompt_modes
-        - likert.multiplier_artifact_name: W&B artifact with optimized multipliers
-        - likert.activation_multipliers: Inline multipliers dict
+        - ipi.multiplier_artifact_name: W&B artifact with optimized multipliers
+        - ipi.activation_multipliers: Inline multipliers dict
         - activation_multipliers: Legacy inline multipliers dict
     """
     # Change back to project directory (Hydra changes cwd to outputs/)
@@ -637,9 +633,8 @@ def main(cfg: DictConfig):
         )
 
     # Prepare wandb config metadata
-    ipi_eval_cfg = cfg.get('likert', {}) or {}
-    multiplier_artifact_name = ipi_eval_cfg.get(
-        'multiplier_artifact_name', None)
+    ipi_cfg = cfg.get('ipi', {}) or cfg.get('likert', {}) or {}
+    multiplier_artifact_name = ipi_cfg.get('multiplier_artifact_name', None)
 
     wandb_config = OmegaConf.to_container(cfg, resolve=True)
     wandb_config.update({
@@ -672,7 +667,7 @@ def main(cfg: DictConfig):
             # Override: we need wandb for artifact loading, so enable logging
             log_to_wandb = True
 
-    # Load activation multipliers (same logic as likert_scale_test.py)
+    # Load activation multipliers (same logic as ipi_eval.py)
     activation_multipliers, multiplier_provenance = _load_multipliers_from_config(
         cfg)
     multiplier_source = multiplier_provenance["source"]

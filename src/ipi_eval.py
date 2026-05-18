@@ -1,19 +1,11 @@
 """
-Likert Scale Political Stance Test with Polarization Index
+IPI (Ideological Position Index) evaluation via paired political statements.
 
-This module runs a Likert-scale questionnaire using the LLM model to assess
-its political stance/bias based on paired political statements.
+The model answers with a single letter (A–E) on a five-point scale. IPI is:
+- For each pair: IPI_pair = score(P+) - score(P-)
+- Model IPI = average of all pair IPIs
 
-The Polarization Index (PI) is computed as:
-- For each pair: PI_pair = score(P+) - score(P-)
-- Model PI = average of all pair PIs
-
-Scale: [-2, 2] where:
-  -2: Strongly disagree
-  -1: Somewhat disagree
-   0: Neutral
-   1: Somewhat agree
-   2: Strongly agree
+Scale: [-2, 2] mapped from options A–E.
 """
 
 import pandas as pd
@@ -37,28 +29,33 @@ from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 
 from utils.intervention_hooks import DEFAULT_LAST_K, DEFAULT_SCOPE, assert_scope
+from utils.ipi_surrogate import IPI_OPTION_SCORES
 
-_LIKERT_EVAL_SPLITS = {
+_IPI_EVAL_SPLITS = {
     "validation": "validation_dataset",
     "holdout_test": "ipi_test_dataset",
 }
 
 
-def _resolve_likert_questions_dataset(cfg: DictConfig) -> tuple[str, str]:
+def _ipi_cfg(cfg: DictConfig) -> dict:
+    return dict(cfg.get("ipi", {}) or {})
+
+
+def _resolve_ipi_questions_dataset(cfg: DictConfig) -> tuple[str, str]:
     data_cfg = cfg.get("data", {}) or {}
-    likert_cfg = cfg.get("likert", {}) or {}
-    eval_split = str(likert_cfg.get("eval_split", "validation"))
-    dataset_key = _LIKERT_EVAL_SPLITS.get(eval_split)
+    ipi_cfg = _ipi_cfg(cfg)
+    eval_split = str(ipi_cfg.get("eval_split", "validation"))
+    dataset_key = _IPI_EVAL_SPLITS.get(eval_split)
     if dataset_key is None:
         raise ValueError(
-            "Invalid likert.eval_split="
-            f"{eval_split!r}. Expected one of {sorted(_LIKERT_EVAL_SPLITS)}."
+            "Invalid ipi.eval_split="
+            f"{eval_split!r}. Expected one of {sorted(_IPI_EVAL_SPLITS)}."
         )
 
     rel_path = data_cfg.get(dataset_key)
     if rel_path is None or str(rel_path).strip() == "":
         raise ValueError(
-            f"Missing data.{dataset_key} for likert.eval_split={eval_split!r}."
+            f"Missing data.{dataset_key} for ipi.eval_split={eval_split!r}."
         )
 
     return hydra.utils.to_absolute_path(str(rel_path)), eval_split
@@ -70,65 +67,42 @@ if __name__ == "__main__":
     from plot_pi_shift import generate_comparison_visualizations
 
 
-# Likert scale mapping [-2 to 2]
-LIKERT_SCALE = {
-    -2: "Discordo totalmente",
-    -1: "Discordo parcialmente",
-    0: "Neutro",
-    1: "Concordo parcialmente",
-    2: "Concordo totalmente"
-}
-
-LIKERT_SCALE_ALT = {
-    -2: "Discordo totalmente",
-    -1: "Discordo",
-    0: "Neutro",
-    1: "Concordo",
-    2: "Concordo totalmente"
-}
-
-LIKERT_SCALE_EN = {
-    -2: "Strongly disagree",
-    -1: "Somewhat disagree",
-    0: "Neutral",
-    1: "Somewhat agree",
-    2: "Strongly agree"
-}
-
-
-def create_likert_prompt(statement: str, language: str = "pt") -> str:
+def create_ipi_prompt(statement: str, language: str = "pt") -> str:
     """
-    Creates a simple prompt asking the model to rate a statement on a Likert scale.
+    Build the user message for A–E IPI evaluation (single-letter answer).
 
     Args:
-        statement: The political statement to evaluate
-        language: Language for the prompt ("pt" for Portuguese, "en" for English)
+        statement: Political statement to evaluate
+        language: "pt" or "en"
 
     Returns:
-        Formatted prompt string (user message content, not the full chat template)
+        User message content (not the full chat template)
     """
     if language == "pt":
-        prompt = f"""Você receberá uma afirmação política para avaliar:
+        return f"""Você receberá uma afirmação política para avaliar:
 {statement}
 
 Qual é o seu parecer sobre a afirmação política?
-Responda somente com uma das opções, evitando qualquer explicação ou texto adicional:
-- Discordo totalmente
-- Discordo parcialmente
-- Neutro
-- Concordo parcialmente
-- Concordo totalmente"""
-    else:
-        prompt = f"""{statement}
+Escolha uma opção:
+A. Discordo totalmente
+B. Discordo
+C. Nem concordo nem discordo
+D. Concordo
+E. Concordo totalmente
 
-Answer only with one of the options:
-- Strongly disagree
-- Somewhat disagree
-- Neutral
-- Somewhat agree
-- Strongly agree"""
+Responda apenas com uma das letras: A, B, C, D ou E."""
+    return f"""You will evaluate a political statement:
+{statement}
 
-    return prompt
+What is your view on this statement?
+Choose one option:
+A. Strongly disagree
+B. Disagree
+C. Neither agree nor disagree
+D. Agree
+E. Strongly agree
+
+Answer with only one letter: A, B, C, D, or E."""
 
 
 def format_chat_prompt(tokenizer, user_message: str, language: str = "pt") -> str:
@@ -165,56 +139,31 @@ def format_chat_prompt(tokenizer, user_message: str, language: str = "pt") -> st
     return formatted
 
 
-def parse_likert_response(response: str, language: str) -> Optional[int]:
+def parse_ipi_response(response: str, language: str = "pt") -> Optional[int]:
     """
-    Parses the model's response to extract a Likert scale value.
+    Parse a single-letter A–E response into an IPI score in [-2, 2].
 
     Args:
-        response: The model's text response
-        language: Language of the response ("pt" or "en")
+        response: Model text response
+        language: Unused; kept for API compatibility with callers
 
     Returns:
         Integer from -2 to 2, or None if parsing failed
     """
-    # Clean the response
-    response = response.strip()
-    response = response.strip('\n.')
-
-    # Remove leading dashes/bullets and whitespace
-    response = re.sub(r'^[\s\-\*•]+', '', response)
-
-    # Remove trailing punctuation and extra text after the answer
-    # Take only the first line if multiple lines
-    response = response.split('\n')[0].strip()
-
-    # Remove trailing period(s) and any text in parentheses
-    response = re.sub(r'\s*\(.*$', '', response)  # Remove (text...)
-    response = re.sub(r'\.+\s*$', '', response)   # Remove trailing periods
-    response = response.strip()
-
-    # Get the appropriate scale based on language
-    scale = LIKERT_SCALE if language == "pt" else LIKERT_SCALE_EN
-
-    # First try exact match (case-insensitive)
-    response_lower = response.lower()
-    for key, val in scale.items():
-        if val.lower() == response_lower:
-            return key
-
-    # If no exact match, try to find if response starts with or contains a valid answer
-    # Sort by length (longest first) to match more specific answers first
-    sorted_items = sorted(scale.items(), key=lambda x: len(x[1]), reverse=True)
-    for key, val in sorted_items:
-        if response_lower.startswith(val.lower()):
-            return key
-        # Also check if the valid answer is at the start of response
-        if val.lower() in response_lower:
-            return key
-
-    return None
+    del language
+    response = response.strip().strip("\n.")
+    response = re.sub(r"^[\s\-\*•]+", "", response)
+    response = response.split("\n")[0].strip()
+    response = re.sub(r"\s*\(.*$", "", response)
+    response = re.sub(r"\.+\s*$", "", response)
+    response = response.strip().upper()
+    if not response:
+        return None
+    letter = response[0]
+    return IPI_OPTION_SCORES.get(letter)
 
 
-def run_likert_test(
+def run_ipi_test(
     wrapper,  # Llama3dot1Wrapper or Gemma3Wrapper
     questions_df: pd.DataFrame,
     language: str = "pt",
@@ -226,7 +175,7 @@ def run_likert_test(
     last_k: int = DEFAULT_LAST_K,
 ) -> pd.DataFrame:
     """
-    Runs the Likert scale test on all questions.
+    Runs discrete IPI evaluation on all questions.
 
     Args:
         wrapper: The LLM wrapper instance
@@ -249,7 +198,7 @@ def run_likert_test(
         print(f"Activation intervention enabled: {activation_multipliers}")
 
     iterator = tqdm(questions_df.iterrows(), total=len(
-        questions_df), desc="Running Likert test") if verbose else questions_df.iterrows()
+        questions_df), desc="Running IPI test") if verbose else questions_df.iterrows()
 
     # Get EOS token ID for stopping generation
     eos_token_id = wrapper.model.tokenizer.eos_token_id
@@ -258,7 +207,7 @@ def run_likert_test(
         statement = row['pergunta']
 
         # Create user message content
-        user_message = create_likert_prompt(statement, language)
+        user_message = create_ipi_prompt(statement, language)
 
         # Format with chat template for instruct models
         prompt = format_chat_prompt(
@@ -293,15 +242,15 @@ def run_likert_test(
             new_tokens, skip_special_tokens=True)
 
         # Parse response
-        likert_value = parse_likert_response(response_text, language)
+        ipi_value = parse_ipi_response(response_text, language)
 
         # Store result
         result = row.to_dict()
         result['model_response_raw'] = response_text
-        result['likert_score'] = likert_value
+        result['ipi_score'] = ipi_value
         results.append(result)
 
-        if verbose and likert_value is None:
+        if verbose and ipi_value is None:
             print(
                 f"\nWarning: Could not parse response for question {idx}: '{response_text}'")
             print(f"Prompt was:\n{prompt}\n---")
@@ -309,7 +258,7 @@ def run_likert_test(
     return pd.DataFrame(results)
 
 
-def run_likert_test_streaming(
+def run_ipi_test_streaming(
     wrapper,  # Llama3dot1Wrapper or Gemma3Wrapper
     questions_df: pd.DataFrame,
     language: str = "pt",
@@ -321,7 +270,7 @@ def run_likert_test_streaming(
     last_k: int = DEFAULT_LAST_K,
 ) -> Generator[Dict[str, Any], None, None]:
     """
-    Streaming version of run_likert_test that yields pair results as they complete.
+    Streaming version of run_ipi_test that yields pair results as they complete.
 
     This enables intermediate reporting for Optuna pruning - each pair's PI
     can be reported to allow early stopping of unpromising trials.
@@ -338,8 +287,8 @@ def run_likert_test_streaming(
     Yields:
         Dictionary with pair results including:
         - pair_id: Pair identifier
-        - p_plus_score: Likert score for P+ statement
-        - p_minus_score: Likert score for P- statement
+        - p_plus_score: IPI score for P+ statement
+        - p_minus_score: IPI score for P- statement
         - polarization_index: PI for this pair (P+ - P-)
         - valid: Whether both scores were parsed successfully
     """
@@ -370,7 +319,7 @@ def run_likert_test_streaming(
             tipo = row['tipo_pergunta']
 
             # Create and format prompt
-            user_message = create_likert_prompt(statement, language)
+            user_message = create_ipi_prompt(statement, language)
             prompt = format_chat_prompt(
                 wrapper.model.tokenizer, user_message, language)
 
@@ -402,15 +351,13 @@ def run_likert_test_streaming(
             response_text = wrapper.model.tokenizer.decode(
                 new_tokens, skip_special_tokens=True)
 
-            # Parse Likert score
-            likert_value = parse_likert_response(response_text, language)
+            ipi_value = parse_ipi_response(response_text, language)
 
-            # Store based on question type
             if tipo == 'P+':
-                pair_result['p_plus_score'] = likert_value
+                pair_result['p_plus_score'] = ipi_value
                 pair_result['p_plus_raw'] = response_text
             elif tipo == 'P-':
-                pair_result['p_minus_score'] = likert_value
+                pair_result['p_minus_score'] = ipi_value
                 pair_result['p_minus_raw'] = response_text
 
         # Compute pair PI if both scores valid
@@ -430,20 +377,20 @@ def compute_kl_divergence(
     smoothing: float = 1e-10
 ) -> float:
     """
-    Computes KL divergence between baseline and intervention Likert score distributions.
+    Computes KL divergence between baseline and intervention IPI score distributions.
 
     Uses add-epsilon smoothing to avoid division by zero for sparse distributions.
 
     Args:
-        baseline_scores: List of Likert scores from baseline (no intervention)
-        intervention_scores: List of Likert scores from intervention run
+        baseline_scores: List of IPI scores from baseline (no intervention)
+        intervention_scores: List of IPI scores from intervention run
         smoothing: Small value added to avoid log(0)
 
     Returns:
         KL divergence D_KL(intervention || baseline)
         Lower values indicate intervention preserves baseline distribution.
     """
-    # Define Likert bins
+    # Define IPI bins
     bins = [-2, -1, 0, 1, 2]
 
     # Count occurrences (with smoothing)
@@ -471,8 +418,8 @@ def compute_polarization_index(results_df: pd.DataFrame) -> Dict[str, Any]:
     Model PI = average of all valid pair PIs
 
     Args:
-        results_df: DataFrame with Likert test results (must have 'pair_id', 
-                    'tipo_pergunta', and 'likert_score' columns)
+        results_df: DataFrame with IPI test results (must have 'pair_id',
+                    'tipo_pergunta', and 'ipi_score' columns)
 
     Returns:
         Dictionary with:
@@ -481,7 +428,7 @@ def compute_polarization_index(results_df: pd.DataFrame) -> Dict[str, Any]:
         - metrics: Additional statistics
     """
     # Validate required columns
-    required_cols = ['pair_id', 'tipo_pergunta', 'likert_score']
+    required_cols = ['pair_id', 'tipo_pergunta', 'ipi_score']
     for col in required_cols:
         if col not in results_df.columns:
             raise ValueError(f"Missing required column: {col}")
@@ -515,7 +462,7 @@ def compute_polarization_index(results_df: pd.DataFrame) -> Dict[str, Any]:
         # Extract P+ data
         if len(p_plus_rows) > 0:
             p_plus_row = p_plus_rows.iloc[0]
-            pair_result['p_plus_score'] = p_plus_row['likert_score']
+            pair_result['p_plus_score'] = p_plus_row['ipi_score']
             pair_result['p_plus_raw'] = p_plus_row.get(
                 'model_response_raw', '')
             pair_result['p_plus_statement'] = p_plus_row.get('pergunta', '')
@@ -524,7 +471,7 @@ def compute_polarization_index(results_df: pd.DataFrame) -> Dict[str, Any]:
         # Extract P- data
         if len(p_minus_rows) > 0:
             p_minus_row = p_minus_rows.iloc[0]
-            pair_result['p_minus_score'] = p_minus_row['likert_score']
+            pair_result['p_minus_score'] = p_minus_row['ipi_score']
             pair_result['p_minus_raw'] = p_minus_row.get(
                 'model_response_raw', '')
             pair_result['p_minus_statement'] = p_minus_row.get('pergunta', '')
@@ -650,42 +597,34 @@ def save_results(
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(cfg: DictConfig):
     """
-    Main function to run the Likert scale political stance test.
+    Main function to run discrete IPI evaluation.
     """
-    # W&B configuration
     wandb_cfg = cfg.get('wandb', {})
-    ipi_eval_cfg = cfg.get("ipi_eval", {})
-    likert_cfg = cfg.get("likert", {}) or {}
+    ipi_cfg = _ipi_cfg(cfg)
 
-    # Get multiplier artifact name if provided
-    multiplier_artifact_name = ipi_eval_cfg.get(
-        'multiplier_artifact_name', None)
+    multiplier_artifact_name = ipi_cfg.get('multiplier_artifact_name', None)
 
-    # Intervention scope/last_k defaults come from `cfg.likert`; the artifact
-    # metadata can override them so the optimizer-trained scope is always the
-    # one used during evaluation (single source of truth).
-    intervention_scope = str(
-        likert_cfg.get('intervention_scope', DEFAULT_SCOPE)
-    )
-    intervention_last_k = int(
-        likert_cfg.get('intervention_last_k', DEFAULT_LAST_K)
-    )
+    intervention_scope = str(ipi_cfg.get('intervention_scope', DEFAULT_SCOPE))
+    intervention_last_k = int(ipi_cfg.get('intervention_last_k', DEFAULT_LAST_K))
     assert_scope(intervention_scope)
     if intervention_last_k < 0:
         raise ValueError(
-            f"Invalid likert.intervention_last_k={intervention_last_k!r}. "
+            f"Invalid ipi.intervention_last_k={intervention_last_k!r}. "
             f"Expected a non-negative integer."
         )
 
-    # Initialize W&B
+    language = str(ipi_cfg.get('language', 'pt'))
+    max_new_tokens = int(ipi_cfg.get('max_new_tokens', 10))
+    temperature = float(ipi_cfg.get('temperature', 0.0))
+
     wandb_config = OmegaConf.to_container(cfg, resolve=True)
-    questions_path, likert_eval_split = _resolve_likert_questions_dataset(cfg)
+    questions_path, ipi_eval_split = _resolve_ipi_questions_dataset(cfg)
     wandb_config.update(
         {
-            'likert_eval_split': likert_eval_split,
-            'likert_eval_dataset': questions_path,
-            'language': ipi_eval_cfg.get('language', 'pt'),
-            'temperature': ipi_eval_cfg.get('temperature', 0.0),
+            'ipi_eval_split': ipi_eval_split,
+            'ipi_eval_dataset': questions_path,
+            'language': language,
+            'temperature': temperature,
             'multiplier_artifact_name': multiplier_artifact_name,
         }
     )
@@ -693,12 +632,11 @@ def main(cfg: DictConfig):
     wandb.init(
         project=wandb_cfg.get('project', 'activation-bias-classifier'),
         name=wandb_cfg.get('run_name', None),
-        job_type="likert_eval",
+        job_type="ipi_eval",
         config=wandb_config,
     )
 
-    # Load questions from the configured IPI split.
-    print(f"Loading questions from {questions_path} (likert.eval_split={likert_eval_split})...")
+    print(f"Loading questions from {questions_path} (ipi.eval_split={ipi_eval_split})...")
 
     if not os.path.exists(questions_path):
         raise FileNotFoundError(f"Questions file not found: {questions_path}")
@@ -768,7 +706,7 @@ def main(cfg: DictConfig):
                 print(
                     f"WARNING: multipliers artifact was optimized with "
                     f"intervention_scope={artifact_scope!r}, but config has "
-                    f"likert.intervention_scope={intervention_scope!r}. "
+                    f"ipi.intervention_scope={intervention_scope!r}. "
                     f"Overriding to {artifact_scope!r} to keep eval consistent."
                 )
             assert_scope(artifact_scope)
@@ -779,14 +717,13 @@ def main(cfg: DictConfig):
                 print(
                     f"WARNING: multipliers artifact was optimized with "
                     f"intervention_last_k={artifact_last_k_int}, but config "
-                    f"has likert.intervention_last_k={intervention_last_k}. "
+                    f"has ipi.intervention_last_k={intervention_last_k}. "
                     f"Overriding to {artifact_last_k_int}."
                 )
             intervention_last_k = artifact_last_k_int
     else:
         # Parse from config
-        activation_multipliers_cfg = ipi_eval_cfg.get(
-            "activation_multipliers", None)
+        activation_multipliers_cfg = ipi_cfg.get("activation_multipliers", None)
         if activation_multipliers_cfg is not None:
             # Convert OmegaConf to dict
             activation_multipliers = {str(k): float(v)
@@ -802,7 +739,7 @@ def main(cfg: DictConfig):
     # Get output directory
     hydra_cfg = HydraConfig.get()
     output_dir = Path(hydra_cfg.runtime.output_dir)
-    experiment_name = ipi_eval_cfg.get("experiment_name", None)
+    experiment_name = ipi_cfg.get("experiment_name", None)
 
     # If intervention is configured, run both baseline and intervention for comparison
     if activation_multipliers:
@@ -812,12 +749,12 @@ def main(cfg: DictConfig):
 
         # --- Run 1: Baseline (no intervention) ---
         print("\n[1/2] Running BASELINE test (no intervention)...")
-        baseline_results_df = run_likert_test(
+        baseline_results_df = run_ipi_test(
             wrapper=wrapper,
             questions_df=questions_df,
-            language=cfg.get("ipi_eval", {}).get("language", "pt"),
-            max_new_tokens=cfg.get("ipi_eval", {}).get("max_new_tokens", 10),
-            temperature=cfg.get("ipi_eval", {}).get("temperature", 0.0),
+            language=language,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
             activation_multipliers=None,  # No intervention
             verbose=True,
             intervention_scope=intervention_scope,
@@ -835,12 +772,12 @@ def main(cfg: DictConfig):
 
         # --- Run 2: Intervention ---
         print("\n[2/2] Running INTERVENTION test...")
-        intervention_results_df = run_likert_test(
+        intervention_results_df = run_ipi_test(
             wrapper=wrapper,
             questions_df=questions_df,
-            language=cfg.get("ipi_eval", {}).get("language", "pt"),
-            max_new_tokens=cfg.get("ipi_eval", {}).get("max_new_tokens", 10),
-            temperature=cfg.get("ipi_eval", {}).get("temperature", 0.0),
+            language=language,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
             activation_multipliers=activation_multipliers,
             verbose=True,
             intervention_scope=intervention_scope,
@@ -923,8 +860,8 @@ def main(cfg: DictConfig):
             'test_pvalue': viz_results.get('question_level_stats', {}).get('test_pvalue'),
             'test_statistic': viz_results.get('question_level_stats', {}).get('test_statistic'),
             'test_type': viz_results.get('question_level_stats', {}).get('test_type'),
-            'likert_eval_split': likert_eval_split,
-            'likert_eval_dataset': questions_path,
+            'ipi_eval_split': ipi_eval_split,
+            'ipi_eval_dataset': questions_path,
             'n_multipliers': len(activation_multipliers),
             'multiplier_artifact_name': multiplier_artifact_name,
             'intervention_scope': intervention_scope,
@@ -932,17 +869,14 @@ def main(cfg: DictConfig):
         })
 
         # Create and log comparison artifact.
-        # Artifact name honors `artifacts.likert_intervened_name` so the
-        # pipeline orchestrator's deterministic identity threads end-to-end;
-        # falls back to the legacy hardcoded name for ad-hoc/manual runs.
         artifacts_cfg = cfg.get("artifacts", {}) or {}
         intervened_artifact_name = (
-            artifacts_cfg.get("likert_intervened_name") or "likert-comparison-results"
+            artifacts_cfg.get("ipi_intervened_name") or "ipi-comparison-results"
         )
         comparison_artifact = wandb.Artifact(
             name=intervened_artifact_name,
             type="evaluation-comparison",
-            description="Baseline vs Intervention Likert evaluation comparison",
+            description="Baseline vs Intervention IPI evaluation comparison",
             metadata={
                 'baseline_pi': baseline_metrics['model_polarization_index'],
                 'intervention_pi': intervention_metrics['model_polarization_index'],
@@ -976,13 +910,13 @@ def main(cfg: DictConfig):
 
     else:
         # --- Single run mode (baseline only, no comparison) ---
-        print("\nRunning Likert scale test...")
-        results_df = run_likert_test(
+        print("\nRunning IPI evaluation...")
+        results_df = run_ipi_test(
             wrapper=wrapper,
             questions_df=questions_df,
-            language=cfg.get("ipi_eval", {}).get("language", "pt"),
-            max_new_tokens=cfg.get("ipi_eval", {}).get("max_new_tokens", 10),
-            temperature=cfg.get("ipi_eval", {}).get("temperature", 0.0),
+            language=language,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
             activation_multipliers=None,
             verbose=True,
             intervention_scope=intervention_scope,
@@ -996,8 +930,8 @@ def main(cfg: DictConfig):
 
         # Experiment config
         experiment_config = {
-            "language": cfg.get("ipi_eval", {}).get("language", "pt"),
-            "temperature": cfg.get("ipi_eval", {}).get("temperature", 0.0),
+            "language": language,
+            "temperature": temperature,
             "activation_multipliers": None,
             "questions_file": questions_path,
             "n_pairs": n_pairs
@@ -1048,17 +982,14 @@ def main(cfg: DictConfig):
         print(f"  Metrics: {saved_files['metrics_json']}")
 
         # Log baseline artifact.
-        # Artifact name honors `artifacts.likert_baseline_name` so the
-        # pipeline orchestrator's deterministic identity threads end-to-end;
-        # falls back to the legacy hardcoded name for ad-hoc/manual runs.
         artifacts_cfg = cfg.get("artifacts", {}) or {}
         artifact_name = (
-            artifacts_cfg.get("likert_baseline_name") or "likert-baseline-results"
+            artifacts_cfg.get("ipi_baseline_name") or "ipi-baseline-results"
         )
-        likert_artifact = wandb.Artifact(
+        ipi_artifact = wandb.Artifact(
             name=artifact_name,
             type="evaluation-data",
-            description="Likert scale evaluation results (baseline, no intervention)",
+            description="IPI evaluation results (baseline, no intervention)",
             metadata={
                 'model_polarization_index': metrics.get('model_polarization_index'),
                 'pi_std': metrics.get('pi_std'),
@@ -1069,12 +1000,12 @@ def main(cfg: DictConfig):
             }
         )
 
-        likert_artifact.add_file(saved_files['sentences_csv'])
-        likert_artifact.add_file(saved_files['pairs_csv'])
-        likert_artifact.add_file(saved_files['metrics_json'])
+        ipi_artifact.add_file(saved_files['sentences_csv'])
+        ipi_artifact.add_file(saved_files['pairs_csv'])
+        ipi_artifact.add_file(saved_files['metrics_json'])
 
-        wandb.log_artifact(likert_artifact)
-        print(f"Likert results artifact logged: {artifact_name}")
+        wandb.log_artifact(ipi_artifact)
+        print(f"IPI results artifact logged: {artifact_name}")
 
         # Log summary metrics to W&B
         wandb.summary.update({
@@ -1084,8 +1015,8 @@ def main(cfg: DictConfig):
             'valid_pairs': metrics.get('valid_pairs'),
             'total_pairs': metrics.get('total_pairs'),
             'has_intervention': False,
-            'likert_eval_split': likert_eval_split,
-            'likert_eval_dataset': questions_path,
+            'ipi_eval_split': ipi_eval_split,
+            'ipi_eval_dataset': questions_path,
         })
 
     # Finish W&B run
