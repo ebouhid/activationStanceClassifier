@@ -137,7 +137,27 @@ directions = minimize, maximize
 
 Add or normalize these fields in the Hydra config tree.
 
+### Centralized seeds (`src/utils/seeds.py`, branch `feat/centralize-seeds`)
+
+- **Global:** `seed: 42` (only non-null default in base config).
+- **Per-process overrides:** default `null`; resolved as `stage → experiment.seed → global`.
+- **Nested:** `optimization.fast_sample_seed: null` inherits resolved `optimization.seed`.
+- **Pipeline:** subprocess commands receive explicit seed CLI overrides; manifest has `seed` (optimization) and `seeds` audit map.
+
+| Process | Config key | Script |
+|---------|------------|--------|
+| training | `training.random_state` | `train_eval_svc.py` |
+| feature_selection | `feature_selection.seed` | `train_eval_svc.py` |
+| extraction | `extraction.seed` | `extract_activations.py` |
+| optimization | `optimization.seed` | `optimize_intervention.py` |
+| fast_mode sampling | `optimization.fast_sample_seed` | `optimize_intervention.py` |
+| split (reserved) | `optimization.split_seed` | logged only |
+| ipi | `ipi.seed` | `ipi_eval.py` |
+| poeta | `poeta.seed` | `poeta_evaluator.py` |
+
 ```yaml
+seed: 42
+
 data:
   split_id: null
   feature_selection_dataset: null
@@ -145,34 +165,45 @@ data:
   validation_dataset: null
   ipi_test_dataset: null
 
+training:
+  random_state: null
+
 feature_selection:
   method: anova_mrmr
   ranking_top_n: 256
-  seed: 42
+  seed: null
+
+extraction:
+  seed: null
 
 optimization:
   direction: minimize
   top_k: 80
   n_trials: 500
-  seed: 42
+  seed: null
+  fast_sample_seed: null
   objective_mode: soft_ipi
   validation_fraction: null
-  split_seed: 42
+  split_seed: null
 
-likert:
+ipi:
   condition: baseline
   multiplier_artifact_name: null
   prompt_template_version: default
   parser_version: default
   temperature: 0
   decoding_strategy: greedy
+  seed: null
+
+poeta:
+  seed: null
 
 artifacts:
   activations_name: null
   feature_ranking_name: null
   multiplier_name: null
-  likert_baseline_name: null
-  likert_intervened_name: null
+  ipi_baseline_name: null
+  ipi_intervened_name: null
 
 pipeline:
   dry_run: true
@@ -1304,6 +1335,7 @@ Record implementation decisions here.
 
 | Date | Decision | Rationale | Files affected |
 |---|---|---|---|
+| 2026-05-20 | Centralize seeds on `feat/centralize-seeds` (based on `feat/ae-expected-ipi-surrogate`) | Global `seed` + nullable per-process overrides; pipeline threads resolved seeds to subprocesses | `src/utils/seeds.py`, config, stage scripts, `run_pipeline.py` |
 | 2026-05-11 | Persist manifest metrics by reading W&B after job execution and via a standalone backfill script | Closes the gap where executed jobs left manifest metrics null even though W&B had the values; matches the stated dual-persistence decision (manifest + W&B) | src/run_pipeline.py, src/utils/metrics_backfill.py, src/backfill_manifests.py |
 | 2026-05-11 | Use the multipliers W&B artifact metadata as the canonical source for soft optimization/validation metrics during backfill | The multipliers artifact name is deterministic and respected by `optimize_intervention.py`, so it maps 1:1 to a manifest without ambiguity | src/utils/metrics_backfill.py |
 | 2026-05-11 | Match intervened Likert W&B runs by `config.multiplier_artifact_name` (with `summary.multiplier_artifact_name` as a mirrored fallback) | Likert artifacts are generic/hardcoded historically; matching on the multipliers reference is the only deterministic per-job key available across past runs | src/utils/metrics_backfill.py, src/likert_scale_test.py |

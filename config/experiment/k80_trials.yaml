@@ -1,6 +1,6 @@
 name: k80_trials
 split_id: three_way_plus_holdout_v1
-seed: 42
+seed: null
 # Manifest root: runs/<runs_subdir>/ (default pipeline when null).
 runs_subdir: null
 

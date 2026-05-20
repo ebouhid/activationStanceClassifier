@@ -300,6 +300,7 @@ def run_poeta_evaluation(
     evaluation_variant: str = "baseline",
     multiplier_source: str = "none",
     multiplier_artifact_name: Optional[str] = None,
+    random_seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Run PoETa V2 benchmark evaluation on a model with optional interventions.
@@ -377,23 +378,35 @@ def run_poeta_evaluation(
     original_cwd = os.getcwd()
     os.chdir(POETA_PATH)
 
+    eval_kwargs: dict[str, Any] = {
+        "model": model,
+        "model_args": "",
+        "tasks": task_names,
+        "num_fewshot": num_fewshot,
+        "prompt_modes": prompt_modes_list,
+        "batch_size": batch_size,
+        "device": device,
+        "no_cache": True,
+        "limit": limit,
+        "description_dict": description_dict,
+        "conversation_template": None,
+        "prompt_as_single_user_message": False,
+        "check_integrity": False,
+        "output_dir": output_dir,
+    }
+    if random_seed is not None:
+        import inspect
+
+        if "random_seed" in inspect.signature(evaluator.simple_evaluate).parameters:
+            eval_kwargs["random_seed"] = int(random_seed)
+        else:
+            print(
+                "Warning: lm-eval simple_evaluate does not accept random_seed; "
+                f"poeta.seed={random_seed} recorded in metadata only."
+            )
+
     try:
-        results = evaluator.simple_evaluate(
-            model=model,
-            model_args="",  # Not used since we pass model instance
-            tasks=task_names,
-            num_fewshot=num_fewshot,
-            prompt_modes=prompt_modes_list,
-            batch_size=batch_size,
-            device=device,
-            no_cache=True,
-            limit=limit,
-            description_dict=description_dict,
-            conversation_template=None,
-            prompt_as_single_user_message=False,
-            check_integrity=False,
-            output_dir=output_dir,
-        )
+        results = evaluator.simple_evaluate(**eval_kwargs)
     finally:
         os.chdir(original_cwd)
 
@@ -402,6 +415,7 @@ def run_poeta_evaluation(
         'model_name': model_name,
         'activation_multipliers': activation_multipliers,
         'num_interventions': len(activation_multipliers or {}),
+        'random_seed': random_seed,
         'evaluation_type': 'intervened' if activation_multipliers else 'baseline',
         'evaluation_variant': evaluation_variant,
         'multiplier_source': multiplier_source,
@@ -600,6 +614,16 @@ def main(cfg: DictConfig):
 
     print(OmegaConf.to_yaml(cfg))
 
+    from utils.seeds import (
+        log_resolved_seeds,
+        resolve_seeds_from_cfg,
+        resolved_seeds_to_dict,
+    )
+
+    resolved = resolve_seeds_from_cfg(cfg)
+    log_resolved_seeds(resolved, prefix="poeta_evaluator")
+    poeta_seed = resolved.poeta
+
     wandb_cfg = cfg.get('wandb', {})
     if wandb_cfg is None:
         wandb_cfg = {}
@@ -641,6 +665,8 @@ def main(cfg: DictConfig):
         'evaluation_variant': evaluation_variant,
         'multiplier_source': 'artifact' if multiplier_artifact_name else 'config_or_none',
         'multiplier_artifact_name': multiplier_artifact_name,
+        'poeta_seed': poeta_seed,
+        'resolved_seeds': resolved_seeds_to_dict(resolved),
     })
 
     if log_to_wandb:
@@ -749,6 +775,7 @@ def main(cfg: DictConfig):
             evaluation_variant=evaluation_variant,
             multiplier_source=multiplier_source,
             multiplier_artifact_name=multiplier_artifact_name,
+            random_seed=poeta_seed,
         )
 
     if poeta_save_logs:
@@ -780,6 +807,8 @@ def main(cfg: DictConfig):
         'output_dir': poeta_output_dir,
         'description_dict_path': poeta_description_dict_path,
         'timestamp': datetime.now().isoformat(),
+        'poeta_seed': poeta_seed,
+        'resolved_seeds': resolved_seeds_to_dict(resolved),
     }
     with open(config_path, 'w') as f:
         json.dump(config_data, f, indent=2)

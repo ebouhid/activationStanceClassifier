@@ -3,6 +3,9 @@ defaults:
   - model: null  # Leaves the model group blank by default
   - experiment: null  # Optional experiment matrix for pipeline orchestration
 
+# Canonical global seed (stage overrides default to null and inherit this).
+seed: 42
+
 # Data paths
 data:
   split_id: null
@@ -17,7 +20,7 @@ data:
 # SVM training settings
 training:
   test_size: 0.4
-  random_state: 42
+  random_state: null
   kernel: "rbf"
   image_file: "svc_decision_boundary.png"
   class_weight: "balanced"
@@ -31,7 +34,10 @@ feature_selection:
   method: "anova_mrmr"
   method_mrmr: "MIQ"
   ranking_top_n: 256
-  seed: 42
+  seed: null
+
+extraction:
+  seed: null
 
 ipi:
   condition: baseline
@@ -46,6 +52,7 @@ ipi:
   max_new_tokens: 10
   experiment_name: null
   activation_multipliers: null
+  seed: null
   # Intervention scope used during IPI generation. See
   # `src/utils/intervention_hooks.py`. When a multipliers artifact is loaded,
   # its metadata overrides these values.
@@ -56,10 +63,11 @@ optimization:
   direction: minimize
   top_k: 80
   n_trials: 500
-  seed: 42
+  seed: null
+  fast_sample_seed: null
   objective_mode: soft_ipi
   validation_fraction: null
-  split_seed: 42
+  split_seed: null
   # W&B artifact name for the SVM feature ranking input (set by the pipeline
   # orchestrator; standalone runs of optimize_intervention.py must override
   # this explicitly).
@@ -70,6 +78,9 @@ optimization:
   # the historical `buffer_size = 3` behavior.
   intervention_scope: prompt_without_buffer
   intervention_last_k: 3
+
+poeta:
+  seed: null
 
 artifacts:
   activations_name: null
@@ -97,5 +108,3 @@ wandb:
   project: "LLM-Lobotomy"
   run_name: null
   log_to_wandb: true
-
-random_state: 42

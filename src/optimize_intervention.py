@@ -666,9 +666,19 @@ def main(cfg: DictConfig):
 
     # Wrap entire execution in OutputLogger to capture all terminal output
     with OutputLogger(log_path):
-        # Extract configuration
+        from utils.seeds import (
+            log_resolved_seeds,
+            resolve_seeds_from_cfg,
+            resolved_seeds_to_dict,
+        )
+
         opt_cfg = cfg.optimization
         ipi_cfg = cfg.get("ipi", {}) or {}
+        resolved = resolve_seeds_from_cfg(cfg)
+        log_resolved_seeds(resolved, prefix="optimize_intervention")
+        seed = resolved.optimization
+        fast_sample_seed = resolved.optimization_fast_sample
+        split_seed = resolved.optimization_split
 
         # W&B configuration
         wandb_cfg = cfg.get('wandb', {})
@@ -676,7 +686,6 @@ def main(cfg: DictConfig):
         top_k = opt_cfg.get('top_k', opt_cfg.get('target_neuron_count', 80))
         n_trials = opt_cfg.get('n_trials', 3000)
         direction = opt_cfg.get('direction', 'maximize')
-        seed = opt_cfg.get('seed', cfg.get('random_state', 42))
         intervention_scope = str(opt_cfg.get('intervention_scope', DEFAULT_SCOPE))
         intervention_last_k = int(opt_cfg.get('intervention_last_k', DEFAULT_LAST_K))
 
@@ -700,10 +709,11 @@ def main(cfg: DictConfig):
 
         top_k = int(top_k)
         n_trials = int(n_trials)
-        seed = int(seed)
 
         # Initialize W&B with job_type="optimization"
         wandb_config = OmegaConf.to_container(cfg, resolve=True)
+        if isinstance(wandb_config, dict):
+            wandb_config["resolved_seeds"] = resolved_seeds_to_dict(resolved)
         wandb.init(
             project=wandb_cfg.get('project', 'activation-bias-classifier'),
             name=wandb_cfg.get('run_name', None),
@@ -790,7 +800,9 @@ def main(cfg: DictConfig):
         print("=" * 70)
         print("NEURON INTERVENTION OPTIMIZATION (EXPECTED IPI SURROGATE)")
         print("=" * 70)
-        print(f"\nSeed: {seed}")
+        print(f"\nSeed (optimization): {seed}")
+        print(f"Fast-sample seed: {fast_sample_seed}")
+        print(f"Split seed (reserved): {split_seed}")
         print(f"\nOptimization Mode: Expected IPI over A–E options")
         print(f"  - Objective mode: {objective_mode}")
         print(f"  - Direction: {direction}")
@@ -826,7 +838,7 @@ def main(cfg: DictConfig):
             optim_questions_df = sample_questions(
                 optim_questions_df,
                 fast_n_pairs,
-                random_state=cfg.get('random_state', 42)
+                random_state=fast_sample_seed,
             )
             print(
                 f"Sampled {optim_questions_df['pair_id'].nunique()} optimization pairs for fast mode")
@@ -1080,6 +1092,8 @@ def main(cfg: DictConfig):
                 'optimization_dataset': optimization_dataset_path,
                 'validation_dataset': validation_dataset_path,
                 'seed': seed,
+                'fast_sample_seed': fast_sample_seed,
+                'split_seed': split_seed,
                 'n_target_neurons': len(target_neurons),
                 'intervention_scope': intervention_scope,
                 'intervention_last_k': intervention_last_k,

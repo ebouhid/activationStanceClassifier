@@ -1,6 +1,6 @@
 name: scope_ablation
 split_id: three_way_plus_holdout_v1
-seed: 42
+seed: null
 runs_subdir: null
 
 models:

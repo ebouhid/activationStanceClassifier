@@ -22,6 +22,13 @@ from utils.metrics_backfill import (
     MetricsBackfillError,
     collect_run_metrics,
 )
+from utils.seeds import (
+    ResolvedSeeds,
+    log_resolved_seeds,
+    resolve_seeds_from_cfg,
+    resolved_seeds_to_dict,
+    seed_cli_overrides,
+)
 
 
 def _null_metrics() -> dict[str, Any]:
@@ -45,6 +52,7 @@ def _build_commands(
     artifact_names: dict[str, str],
     intervention_scope: str,
     intervention_last_k: int,
+    resolved: ResolvedSeeds,
 ) -> list[str]:
     """
     Compose stage commands with explicit Hydra overrides for every artifact
@@ -65,20 +73,23 @@ def _build_commands(
     activations_ref = f"{activations_name}:latest"
     feature_ranking_ref = f"{feature_ranking_name}:latest"
     multipliers_ref = f"{multipliers_name}:latest"
+    seed_args = seed_cli_overrides(resolved)
 
     cmds: list[str] = []
     if stages.get("extract_activations", False):
         cmds.append(
             "python src/extract_activations.py "
             f"model={model_cfg_name} "
-            f"artifacts.activations_name={activations_name}"
+            f"artifacts.activations_name={activations_name} "
+            f"{seed_args}"
         )
     if stages.get("feature_selection", False):
         cmds.append(
             "python src/train_eval_svc.py "
             f"model={model_cfg_name} "
             f"data.activations_artifact_name={activations_ref} "
-            f"artifacts.feature_ranking_name={feature_ranking_name}"
+            f"artifacts.feature_ranking_name={feature_ranking_name} "
+            f"{seed_args}"
         )
     if stages.get("optimization", False):
         cmds.append(
@@ -90,7 +101,8 @@ def _build_commands(
             f"optimization.intervention_scope={intervention_scope} "
             f"optimization.intervention_last_k={intervention_last_k} "
             f"optimization.feature_artifact_name={feature_ranking_ref} "
-            f"artifacts.multiplier_name={multipliers_name}"
+            f"artifacts.multiplier_name={multipliers_name} "
+            f"{seed_args}"
         )
     if stages.get("ipi_baseline", False) and include_baseline_ipi:
         cmds.append(
@@ -99,7 +111,8 @@ def _build_commands(
             "ipi.multiplier_artifact_name=null "
             f"ipi.intervention_scope={intervention_scope} "
             f"ipi.intervention_last_k={intervention_last_k} "
-            f"artifacts.ipi_baseline_name={ipi_baseline_name}"
+            f"artifacts.ipi_baseline_name={ipi_baseline_name} "
+            f"{seed_args}"
         )
     if stages.get("ipi_intervened", False):
         cmds.append(
@@ -110,10 +123,13 @@ def _build_commands(
             f"ipi.intervention_scope={intervention_scope} "
             f"ipi.intervention_last_k={intervention_last_k} "
             f"ipi.multiplier_artifact_name={multipliers_ref} "
-            f"artifacts.ipi_intervened_name={ipi_intervened_name}"
+            f"artifacts.ipi_intervened_name={ipi_intervened_name} "
+            f"{seed_args}"
         )
     if stages.get("poeta", False):
-        cmds.append(f"python src/poeta_evaluator.py model={model_cfg_name}")
+        cmds.append(
+            f"python src/poeta_evaluator.py model={model_cfg_name} {seed_args}"
+        )
     return cmds
 
 
@@ -289,7 +305,9 @@ def main(cfg: DictConfig) -> None:
 
     experiment = cfg.experiment
     split_id = str(experiment.split_id)
-    seed = int(experiment.seed)
+    resolved = resolve_seeds_from_cfg(cfg)
+    optimization_seed = resolved.optimization
+    baseline_seed = resolved.ipi
     data_cfg = cfg.get("data", {}) or {}
     if not data_cfg.get("validation_dataset"):
         raise ValueError("data.validation_dataset must be set for pipeline planning.")
@@ -355,7 +373,7 @@ def main(cfg: DictConfig) -> None:
                             direction=direction,
                             top_k=top_k,
                             n_trials=n_trials,
-                            seed=seed,
+                            seed=optimization_seed,
                             scope=scope,
                             last_k=intervention_last_k,
                         )
@@ -369,7 +387,7 @@ def main(cfg: DictConfig) -> None:
                         baseline_key = _baseline_reuse_key(
                             model_cfg_name=model_cfg_name,
                             split_id=split_id,
-                            seed=seed,
+                            seed=baseline_seed,
                             cfg=cfg,
                         )
                         include_baseline_ipi = baseline_key not in scheduled_baseline_keys
@@ -401,7 +419,7 @@ def main(cfg: DictConfig) -> None:
                                     direction=direction,
                                     top_k=top_k,
                                     n_trials=n_trials,
-                                    seed=seed,
+                                    seed=optimization_seed,
                                     scope=scope,
                                     last_k=intervention_last_k,
                                 ),
@@ -409,13 +427,13 @@ def main(cfg: DictConfig) -> None:
                                     model_name=model_cfg_name,
                                     split_id=split_id,
                                     condition="baseline",
-                                    seed=seed,
+                                    seed=baseline_seed,
                                 ),
                                 "ipi_intervened": make_ipi_artifact_name(
                                     model_name=model_cfg_name,
                                     split_id=split_id,
                                     condition="intervened",
-                                    seed=seed,
+                                    seed=optimization_seed,
                                     direction=direction,
                                     top_k=top_k,
                                     n_trials=n_trials,
@@ -434,6 +452,7 @@ def main(cfg: DictConfig) -> None:
                                 artifact_names=artifact_names,
                                 intervention_scope=scope,
                                 intervention_last_k=intervention_last_k,
+                                resolved=resolved,
                             )
                             manifest = {
                                 "run_id": run_id,
@@ -443,7 +462,8 @@ def main(cfg: DictConfig) -> None:
                                 "direction": direction,
                                 "top_k": top_k,
                                 "n_trials": int(n_trials),
-                                "seed": seed,
+                                "seed": optimization_seed,
+                                "seeds": resolved_seeds_to_dict(resolved),
                                 "intervention_scope": scope,
                                 "intervention_last_k": intervention_last_k,
                                 "commands": commands,
@@ -455,6 +475,7 @@ def main(cfg: DictConfig) -> None:
 
                             job_count += 1
                             print(f"\n[{job_count}] {run_id}")
+                            log_resolved_seeds(resolved, prefix=f"[plan] {run_id}")
                             if previous_status and force:
                                 print(f"  forced replan over previous status={previous_status}")
                             for cmd in commands:
@@ -485,7 +506,8 @@ def main(cfg: DictConfig) -> None:
                                 "direction": direction,
                                 "top_k": top_k,
                                 "n_trials": int(n_trials),
-                                "seed": seed,
+                                "seed": optimization_seed,
+                                "seeds": resolved_seeds_to_dict(resolved),
                                 "intervention_scope": scope,
                                 "intervention_last_k": intervention_last_k,
                                 "commands": [],

@@ -599,6 +599,17 @@ def main(cfg: DictConfig):
     """
     Main function to run discrete IPI evaluation.
     """
+    from utils.seeds import (
+        apply_torch_seed,
+        log_resolved_seeds,
+        resolve_seeds_from_cfg,
+        resolved_seeds_to_dict,
+    )
+
+    resolved = resolve_seeds_from_cfg(cfg)
+    apply_torch_seed(resolved.ipi)
+    log_resolved_seeds(resolved, prefix="ipi_eval")
+
     wandb_cfg = cfg.get('wandb', {})
     ipi_cfg = _ipi_cfg(cfg)
 
@@ -626,6 +637,8 @@ def main(cfg: DictConfig):
             'language': language,
             'temperature': temperature,
             'multiplier_artifact_name': multiplier_artifact_name,
+            'ipi_seed': resolved.ipi,
+            'resolved_seeds': resolved_seeds_to_dict(resolved),
         }
     )
 

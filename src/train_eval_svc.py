@@ -147,6 +147,17 @@ def main(cfg: DictConfig):
     )
     logger = logging.getLogger(__name__)
 
+    from utils.seeds import (
+        log_resolved_seeds,
+        resolve_seeds_from_cfg,
+        resolved_seeds_to_dict,
+    )
+
+    resolved = resolve_seeds_from_cfg(cfg)
+    training_rs = resolved.training
+    fs_seed = resolved.feature_selection
+    log_resolved_seeds(resolved, prefix="train_eval_svc")
+
     # W&B configuration
     wandb_cfg = cfg.get('wandb', {})
     data_cfg = cfg.get('data', {})
@@ -154,6 +165,8 @@ def main(cfg: DictConfig):
 
     # Initialize W&B early (needed if using artifacts)
     wandb_config = OmegaConf.to_container(cfg, resolve=True)
+    if isinstance(wandb_config, dict):
+        wandb_config["resolved_seeds"] = resolved_seeds_to_dict(resolved)
     wandb.init(
         project=wandb_cfg.get('project', 'activation-bias-classifier'),
         name=wandb_cfg.get('run_name', None),
@@ -223,7 +236,7 @@ def main(cfg: DictConfig):
         X, y,
         test_size=test_size,
         stratify=y,
-        random_state=cfg.training.random_state
+        random_state=training_rs
     )
     logger.info(f"\n--- Data Split ---")
     logger.info(f"Total samples: {len(y)}")
@@ -251,7 +264,7 @@ def main(cfg: DictConfig):
     # Initialize K-Fold (on training set only, NOT on holdout)
     k_folds = 3
     skf = StratifiedKFold(n_splits=k_folds, shuffle=True,
-                          random_state=cfg.training.random_state)
+                          random_state=training_rs)
 
     # Store results for each fold
     fold_accuracies = []
@@ -319,7 +332,7 @@ def main(cfg: DictConfig):
 
         # Train SVC
         svc_full = SVC(kernel=cfg.training.kernel,
-                       random_state=cfg.training.random_state,
+                       random_state=training_rs,
                        class_weight=cfg.training.class_weight)
         svc_full.fit(X_train_selected, y_train)
 
@@ -424,7 +437,7 @@ def main(cfg: DictConfig):
     # 5. Train Final Model on Full Training Set and Evaluate on Holdout Test Set
     logger.info("\n--- Training Final Model on Full Training Set ---")
     svc_final = SVC(kernel=cfg.training.kernel,
-                    random_state=cfg.training.random_state,
+                    random_state=training_rs,
                     class_weight=cfg.training.class_weight)
     svc_final.fit(X_train_scaled_selected, y_train_full)
 
@@ -462,7 +475,7 @@ def main(cfg: DictConfig):
 
     # Train a new 2D SVC for visualization purposes (on training data)
     svc_2d = SVC(kernel="rbf",
-                 random_state=cfg.training.random_state,
+                 random_state=training_rs,
                  class_weight='balanced')
     svc_2d.fit(X_train_pca, y_train_full)
 
@@ -549,10 +562,6 @@ def main(cfg: DictConfig):
             feature_selection_method = f"{prefilter_name}+mrmr:{mrmr_name}"
         else:
             feature_selection_method = "no_feature_selection"
-        fs_seed = int(cfg.feature_selection.get(
-            'seed',
-            cfg.training.get('random_state', cfg.get('random_state', 42))
-        ))
         ranking_top_n_effective = len(feature_ranking_df)
 
         ranked_features = []

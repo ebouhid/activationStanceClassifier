@@ -20,6 +20,17 @@ def get_last_token_indices(attention_mask: torch.Tensor) -> torch.Tensor:
 
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(cfg: DictConfig):
+    from utils.seeds import (
+        apply_torch_seed,
+        log_resolved_seeds,
+        resolve_seeds_from_cfg,
+        resolved_seeds_to_dict,
+    )
+
+    resolved = resolve_seeds_from_cfg(cfg)
+    apply_torch_seed(resolved.extraction)
+    log_resolved_seeds(resolved, prefix="extract_activations")
+
     # Configuration from Hydra
     batch_size = cfg.extraction.batch_size
     device = cfg.extraction.device if torch.cuda.is_available(
@@ -35,6 +46,8 @@ def main(cfg: DictConfig):
     # Resolve input path: prefer W&B artifact if provided
     dataset_artifact_name = cfg.data.get('dataset_artifact_name', None)
     wandb_config = OmegaConf.to_container(cfg, resolve=True)
+    if isinstance(wandb_config, dict):
+        wandb_config["resolved_seeds"] = resolved_seeds_to_dict(resolved)
     if dataset_artifact_name:
         # Initialize W&B early to download artifact
         wandb.init(
@@ -95,6 +108,8 @@ def main(cfg: DictConfig):
         'max_length': cfg.extraction.max_length,
         'model_name': cfg.model.name,
         'model_wrapper': cfg.model.wrapper,
+        'extraction_seed': resolved.extraction,
+        'resolved_seeds': resolved_seeds_to_dict(resolved),
     })
 
     # 1. Load Data
