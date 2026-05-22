@@ -20,7 +20,13 @@ from ipi_eval import (
     create_ipi_prompt,
     format_chat_prompt,
 )
-from utils.ipi_surrogate import discover_option_token_ids
+from utils.ipi_surrogate import (
+    discover_option_token_ids,
+    format_option_scores,
+    resolve_option_scores,
+    resolve_option_mapping_seed,
+    seed_dependent_option_scores_enabled,
+)
 from utils.experiment_ids import make_multiplier_artifact_name, scope_identity_suffix
 from utils.intervention_hooks import (
     DEFAULT_LAST_K,
@@ -333,7 +339,8 @@ def run_baseline(
     questions_df: pd.DataFrame,
     language: str = "pt",
     max_new_tokens: int = 10,
-    temperature: float = 0.0
+    temperature: float = 0.0,
+    option_scores: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[int], float]:
     """
     Runs baseline evaluation without interventions.
@@ -360,7 +367,8 @@ def run_baseline(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         activation_multipliers=None,
-        verbose=True
+        verbose=True,
+        option_scores=option_scores,
     ):
         if pair_result['p_plus_score'] is not None:
             baseline_scores.append(pair_result['p_plus_score'])
@@ -676,6 +684,16 @@ def main(cfg: DictConfig):
         ipi_cfg = cfg.get("ipi", {}) or {}
         resolved = resolve_seeds_from_cfg(cfg)
         log_resolved_seeds(resolved, prefix="optimize_intervention")
+        option_scores = resolve_option_scores(cfg)
+        shuffle_option_scores = seed_dependent_option_scores_enabled(cfg)
+        option_mapping_seed = (
+            resolve_option_mapping_seed(cfg) if shuffle_option_scores else None
+        )
+        if shuffle_option_scores:
+            print(
+                f"Seed-dependent A–E mapping (option_mapping_seed={option_mapping_seed}): "
+                f"{format_option_scores(option_scores)}"
+            )
         seed = resolved.optimization
         fast_sample_seed = resolved.optimization_fast_sample
         split_seed = resolved.optimization_split
@@ -861,7 +879,9 @@ def main(cfg: DictConfig):
             wrapper.model.tokenizer, sample_user_message, language
         )
         option_token_ids = discover_option_token_ids(
-            wrapper.model.tokenizer, sample_prompt
+            wrapper.model.tokenizer,
+            sample_prompt,
+            option_scores=option_scores,
         )
         print(f"\nA–E option token IDs ({language}):")
         for score in sorted(option_token_ids):
@@ -877,7 +897,8 @@ def main(cfg: DictConfig):
             questions_df=eval_questions_df,
             language=language,
             max_new_tokens=ipi_cfg.get('max_new_tokens', 10),
-            temperature=ipi_cfg.get('temperature', 0.0)
+            temperature=ipi_cfg.get('temperature', 0.0),
+            option_scores=option_scores,
         )
 
         # Compute baseline soft scores on optimization and validation datasets.
@@ -1098,6 +1119,9 @@ def main(cfg: DictConfig):
                 'intervention_scope': intervention_scope,
                 'intervention_last_k': intervention_last_k,
                 'surrogate': 'expected_ipi_ae',
+                'seed_dependent_option_scores': shuffle_option_scores,
+                'option_mapping_seed': option_mapping_seed,
+                'option_scores': dict(option_scores),
                 **soft_metrics,
             }
         )

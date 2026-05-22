@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import random
 import torch
 import torch.nn.functional as F
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from utils.intervention_hooks import (
     DEFAULT_LAST_K,
@@ -22,17 +23,63 @@ IPI_OPTION_SCORES: dict[str, int] = {
 SCORES_ORDERED = (-2, -1, 0, 1, 2)
 
 
+def option_scores_from_seed(seed: int) -> dict[str, int]:
+    """Deterministic permutation of scores across A–E for a given seed.
+
+    The same mapping applies to every question in a run; different seeds
+    produce different letter→score assignments (each score in {-2..2}
+    appears exactly once).
+    """
+    scores = list(SCORES_ORDERED)
+    rng = random.Random(int(seed))
+    rng.shuffle(scores)
+    return {letter: score for letter, score in zip(IPI_OPTION_LETTERS, scores)}
+
+
+def format_option_scores(option_scores: Mapping[str, int]) -> str:
+    return ", ".join(
+        f"{letter}={option_scores[letter]:+d}" for letter in IPI_OPTION_LETTERS
+    )
+
+
+def seed_dependent_option_scores_enabled(cfg: Any) -> bool:
+    ipi_cfg = cfg.get("ipi", {}) if hasattr(cfg, "get") else {}
+    return bool(ipi_cfg.get("seed_dependent_option_scores", False))
+
+
+def resolve_option_mapping_seed(cfg: Any) -> int:
+    """Seed used for letter→score permutation when seed-dependent mapping is on."""
+    from utils.seeds import _stage_seed, resolve_seeds_from_cfg
+
+    explicit = _stage_seed(cfg, "ipi", "option_mapping_seed")
+    if explicit is not None:
+        return int(explicit)
+    return int(resolve_seeds_from_cfg(cfg).ipi)
+
+
+def resolve_option_scores(cfg: Any) -> dict[str, int]:
+    """Letter→score map for this Hydra config (canonical or seed-permuted)."""
+    if not seed_dependent_option_scores_enabled(cfg):
+        return dict(IPI_OPTION_SCORES)
+    return option_scores_from_seed(resolve_option_mapping_seed(cfg))
+
+
 def option_letter_variants(letter: str) -> list[str]:
     return [letter, f" {letter}", f"\n{letter}", f"{letter}.", f"{letter})"]
 
 
-def discover_option_token_ids(tokenizer: Any, prompt_text: str) -> dict[int, list[int]]:
+def discover_option_token_ids(
+    tokenizer: Any,
+    prompt_text: str,
+    option_scores: Mapping[str, int] | None = None,
+) -> dict[int, list[int]]:
     """Discover single-token IDs for A–E answers in chat-template context."""
+    scores_map = dict(option_scores or IPI_OPTION_SCORES)
     prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
     option_ids: dict[int, list[int]] = {}
 
     for letter in IPI_OPTION_LETTERS:
-        score = IPI_OPTION_SCORES[letter]
+        score = scores_map[letter]
         token_ids: set[int] = set()
         for variant in option_letter_variants(letter):
             continuation_ids = tokenizer.encode(
@@ -161,6 +208,10 @@ if __name__ == "__main__":
     tokenizer = wrapper.model.tokenizer
     user_message = create_ipi_prompt("Exemplo de afirmação política.", language="pt")
     prompt = format_chat_prompt(tokenizer, user_message, language="pt")
+    for seed in (42, 43, 44):
+        permuted = option_scores_from_seed(seed)
+        print(f"seed {seed}: {format_option_scores(permuted)}")
+
     option_ids = discover_option_token_ids(tokenizer, prompt)
     for score in SCORES_ORDERED:
         decoded = [tokenizer.decode([tid]) for tid in option_ids[score]]

@@ -1,0 +1,39 @@
+name: surrogate_validation_ae_likert
+split_id: three_way_plus_holdout_v1
+seed: null
+runs_subdir: a_e_surrogate_altflip
+
+# Permute letter→score mapping by run seed (soft + discrete IPI stay aligned).
+ipi:
+  seed_dependent_option_scores: true
+
+models:
+  - gemma-3-4b
+
+directions:
+  - minimize
+  # - maximize
+
+# Keep this focused. K=32 is the previous stable candidate;
+# K=96 is the current strongest validation candidate for maximization.
+feature_counts:
+  # - 32
+  - 96
+
+trial_grid:
+  # "32": [2000]
+  "96": [2000]
+
+# Keep scope fixed to isolate the effect of the surrogate.
+scopes:
+  - prompt_all
+
+intervention_last_k: 3
+
+stages:
+  extract_activations: false
+  feature_selection: false
+  optimization: true
+  ipi_baseline: true
+  ipi_intervened: true
+  poeta: false

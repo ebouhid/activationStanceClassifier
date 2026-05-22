@@ -43,6 +43,10 @@ ipi:
   condition: baseline
   eval_split: validation
   multiplier_artifact_name: null
+  # When true, permute A–E -> {-2..2} deterministically from option_mapping_seed
+  # (or resolved ipi seed). Same mapping for all questions in a run.
+  seed_dependent_option_scores: false
+  option_mapping_seed: null
   prompt_template_version: ae_options_v1
   parser_version: ae_options_v1
   temperature: 0

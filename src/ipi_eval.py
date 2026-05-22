@@ -29,7 +29,7 @@ from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 
 from utils.intervention_hooks import DEFAULT_LAST_K, DEFAULT_SCOPE, assert_scope
-from utils.ipi_surrogate import IPI_OPTION_SCORES
+from utils.ipi_surrogate import IPI_OPTION_SCORES, resolve_option_scores
 
 _IPI_EVAL_SPLITS = {
     "validation": "validation_dataset",
@@ -139,18 +139,24 @@ def format_chat_prompt(tokenizer, user_message: str, language: str = "pt") -> st
     return formatted
 
 
-def parse_ipi_response(response: str, language: str = "pt") -> Optional[int]:
+def parse_ipi_response(
+    response: str,
+    language: str = "pt",
+    option_scores: Optional[Dict[str, int]] = None,
+) -> Optional[int]:
     """
     Parse a single-letter A–E response into an IPI score in [-2, 2].
 
     Args:
         response: Model text response
         language: Unused; kept for API compatibility with callers
+        option_scores: Letter→score map; defaults to canonical IPI_OPTION_SCORES
 
     Returns:
         Integer from -2 to 2, or None if parsing failed
     """
     del language
+    scores_map = option_scores or IPI_OPTION_SCORES
     response = response.strip().strip("\n.")
     response = re.sub(r"^[\s\-\*•]+", "", response)
     response = response.split("\n")[0].strip()
@@ -160,7 +166,7 @@ def parse_ipi_response(response: str, language: str = "pt") -> Optional[int]:
     if not response:
         return None
     letter = response[0]
-    return IPI_OPTION_SCORES.get(letter)
+    return scores_map.get(letter)
 
 
 def run_ipi_test(
@@ -173,6 +179,7 @@ def run_ipi_test(
     verbose: bool = True,
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
+    option_scores: Optional[Dict[str, int]] = None,
 ) -> pd.DataFrame:
     """
     Runs discrete IPI evaluation on all questions.
@@ -242,7 +249,7 @@ def run_ipi_test(
             new_tokens, skip_special_tokens=True)
 
         # Parse response
-        ipi_value = parse_ipi_response(response_text, language)
+        ipi_value = parse_ipi_response(response_text, language, option_scores)
 
         # Store result
         result = row.to_dict()
@@ -268,6 +275,7 @@ def run_ipi_test_streaming(
     verbose: bool = True,
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
+    option_scores: Optional[Dict[str, int]] = None,
 ) -> Generator[Dict[str, Any], None, None]:
     """
     Streaming version of run_ipi_test that yields pair results as they complete.
@@ -351,7 +359,7 @@ def run_ipi_test_streaming(
             response_text = wrapper.model.tokenizer.decode(
                 new_tokens, skip_special_tokens=True)
 
-            ipi_value = parse_ipi_response(response_text, language)
+            ipi_value = parse_ipi_response(response_text, language, option_scores)
 
             if tipo == 'P+':
                 pair_result['p_plus_score'] = ipi_value
@@ -599,6 +607,11 @@ def main(cfg: DictConfig):
     """
     Main function to run discrete IPI evaluation.
     """
+    from utils.ipi_surrogate import (
+        format_option_scores,
+        resolve_option_mapping_seed,
+        seed_dependent_option_scores_enabled,
+    )
     from utils.seeds import (
         apply_torch_seed,
         log_resolved_seeds,
@@ -609,6 +622,13 @@ def main(cfg: DictConfig):
     resolved = resolve_seeds_from_cfg(cfg)
     apply_torch_seed(resolved.ipi)
     log_resolved_seeds(resolved, prefix="ipi_eval")
+    option_scores = resolve_option_scores(cfg)
+    if seed_dependent_option_scores_enabled(cfg):
+        mapping_seed = resolve_option_mapping_seed(cfg)
+        print(
+            f"Seed-dependent A–E mapping (option_mapping_seed={mapping_seed}): "
+            f"{format_option_scores(option_scores)}"
+        )
 
     wandb_cfg = cfg.get('wandb', {})
     ipi_cfg = _ipi_cfg(cfg)
@@ -639,6 +659,15 @@ def main(cfg: DictConfig):
             'multiplier_artifact_name': multiplier_artifact_name,
             'ipi_seed': resolved.ipi,
             'resolved_seeds': resolved_seeds_to_dict(resolved),
+            'seed_dependent_option_scores': seed_dependent_option_scores_enabled(
+                cfg
+            ),
+            'option_mapping_seed': (
+                resolve_option_mapping_seed(cfg)
+                if seed_dependent_option_scores_enabled(cfg)
+                else None
+            ),
+            'option_scores': dict(option_scores),
         }
     )
 
@@ -772,6 +801,7 @@ def main(cfg: DictConfig):
             verbose=True,
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
+            option_scores=option_scores,
         )
         baseline_pi_data = compute_polarization_index(baseline_results_df)
         baseline_metrics = baseline_pi_data['metrics']
@@ -795,6 +825,7 @@ def main(cfg: DictConfig):
             verbose=True,
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
+            option_scores=option_scores,
         )
         intervention_pi_data = compute_polarization_index(
             intervention_results_df)
@@ -934,6 +965,7 @@ def main(cfg: DictConfig):
             verbose=True,
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
+            option_scores=option_scores,
         )
 
         # Compute Polarization Index
