@@ -29,7 +29,11 @@ from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 
 from utils.intervention_hooks import DEFAULT_LAST_K, DEFAULT_SCOPE, assert_scope
-from utils.ipi_surrogate import IPI_OPTION_SCORES, resolve_option_scores
+from utils.ipi_surrogate import (
+    IPI_OPTION_SCORES,
+    flush_option_scores_wandb_log,
+    resolve_option_scores,
+)
 
 _IPI_EVAL_SPLITS = {
     "validation": "validation_dataset",
@@ -169,6 +173,69 @@ def parse_ipi_response(
     return scores_map.get(letter)
 
 
+def _sanitize_transcript_token(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        return "unknown"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+
+
+def _ipi_transcript_filename(row: pd.Series, row_index: int) -> str:
+    parts = [f"q{int(row_index):04d}"]
+    if "pair_id" in row and pd.notna(row["pair_id"]):
+        parts.append(f"pair{int(row['pair_id'])}")
+    if "tipo_pergunta" in row and pd.notna(row["tipo_pergunta"]):
+        parts.append(_sanitize_transcript_token(row["tipo_pergunta"]))
+    if "eixo" in row and pd.notna(row["eixo"]):
+        parts.append(_sanitize_transcript_token(row["eixo"]))
+    return "_".join(parts) + ".txt"
+
+
+def save_ipi_prompt_answer_txt(
+    path: Path,
+    *,
+    prompt: str,
+    answer_raw: str,
+    statement: str,
+    ipi_score: Optional[int],
+    row: pd.Series,
+) -> Path:
+    """Write one prompt/answer exchange to a UTF-8 .txt file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta_lines = [
+        f"row_index: {row.name if row.name is not None else 'unknown'}",
+        f"pair_id: {row.get('pair_id', '')}",
+        f"tipo_pergunta: {row.get('tipo_pergunta', '')}",
+        f"eixo: {row.get('eixo', '')}",
+        f"parsed_ipi_score: {ipi_score}",
+    ]
+    body = (
+        "\n".join(meta_lines)
+        + "\n\n=== STATEMENT ===\n"
+        + statement
+        + "\n\n=== PROMPT ===\n"
+        + prompt
+        + "\n\n=== MODEL ANSWER (raw) ===\n"
+        + answer_raw
+        + "\n"
+    )
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _attach_transcript_files_to_artifact(
+    artifact: wandb.Artifact,
+    transcripts_dir: Optional[Path],
+) -> int:
+    if transcripts_dir is None or not transcripts_dir.is_dir():
+        return 0
+    count = 0
+    for txt_path in sorted(transcripts_dir.glob("*.txt")):
+        artifact.add_file(str(txt_path), name=f"ipi_transcripts/{txt_path.name}")
+        count += 1
+    return count
+
+
 def run_ipi_test(
     wrapper,  # Llama3dot1Wrapper or Gemma3Wrapper
     questions_df: pd.DataFrame,
@@ -180,6 +247,7 @@ def run_ipi_test(
     intervention_scope: str = DEFAULT_SCOPE,
     last_k: int = DEFAULT_LAST_K,
     option_scores: Optional[Dict[str, int]] = None,
+    transcripts_dir: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
     """
     Runs discrete IPI evaluation on all questions.
@@ -194,11 +262,14 @@ def run_ipi_test(
                                 (format: 'layer_{L}-neuron_{N}') to multiplier values
                                 for activation intervention during generation
         verbose: Whether to show progress
+        transcripts_dir: When set, each prompt/answer pair is saved as a .txt file
 
     Returns:
         DataFrame with original data plus model responses
     """
     results = []
+    transcript_paths: List[str] = []
+    transcripts_root = Path(transcripts_dir) if transcripts_dir else None
 
     # Log if intervention is active
     if activation_multipliers and verbose:
@@ -251,10 +322,24 @@ def run_ipi_test(
         # Parse response
         ipi_value = parse_ipi_response(response_text, language, option_scores)
 
+        if transcripts_root is not None:
+            txt_path = save_ipi_prompt_answer_txt(
+                transcripts_root / _ipi_transcript_filename(row, int(idx)),
+                prompt=prompt,
+                answer_raw=response_text,
+                statement=statement,
+                ipi_score=ipi_value,
+                row=row,
+            )
+            transcript_paths.append(str(txt_path))
+
         # Store result
         result = row.to_dict()
+        result['model_prompt'] = prompt
         result['model_response_raw'] = response_text
         result['ipi_score'] = ipi_value
+        if transcript_paths:
+            result['transcript_txt'] = transcript_paths[-1]
         results.append(result)
 
         if verbose and ipi_value is None:
@@ -262,7 +347,11 @@ def run_ipi_test(
                 f"\nWarning: Could not parse response for question {idx}: '{response_text}'")
             print(f"Prompt was:\n{prompt}\n---")
 
-    return pd.DataFrame(results)
+    results_df = pd.DataFrame(results)
+    if transcript_paths:
+        results_df.attrs["transcript_paths"] = transcript_paths
+        results_df.attrs["transcripts_dir"] = str(transcripts_root)
+    return results_df
 
 
 def run_ipi_test_streaming(
@@ -608,7 +697,7 @@ def main(cfg: DictConfig):
     Main function to run discrete IPI evaluation.
     """
     from utils.ipi_surrogate import (
-        format_option_scores,
+        build_option_scores_log_payload,
         resolve_option_mapping_seed,
         seed_dependent_option_scores_enabled,
     )
@@ -623,12 +712,9 @@ def main(cfg: DictConfig):
     apply_torch_seed(resolved.ipi)
     log_resolved_seeds(resolved, prefix="ipi_eval")
     option_scores = resolve_option_scores(cfg)
-    if seed_dependent_option_scores_enabled(cfg):
-        mapping_seed = resolve_option_mapping_seed(cfg)
-        print(
-            f"Seed-dependent A–E mapping (option_mapping_seed={mapping_seed}): "
-            f"{format_option_scores(option_scores)}"
-        )
+    option_scores_log = build_option_scores_log_payload(
+        option_scores, source="ipi_eval_main"
+    )
 
     wandb_cfg = cfg.get('wandb', {})
     ipi_cfg = _ipi_cfg(cfg)
@@ -668,6 +754,7 @@ def main(cfg: DictConfig):
                 else None
             ),
             'option_scores': dict(option_scores),
+            **option_scores_log,
         }
     )
 
@@ -677,6 +764,7 @@ def main(cfg: DictConfig):
         job_type="ipi_eval",
         config=wandb_config,
     )
+    flush_option_scores_wandb_log()
 
     print(f"Loading questions from {questions_path} (ipi.eval_split={ipi_eval_split})...")
 
@@ -782,6 +870,7 @@ def main(cfg: DictConfig):
     hydra_cfg = HydraConfig.get()
     output_dir = Path(hydra_cfg.runtime.output_dir)
     experiment_name = ipi_cfg.get("experiment_name", None)
+    transcripts_base = output_dir / "ipi_transcripts"
 
     # If intervention is configured, run both baseline and intervention for comparison
     if activation_multipliers:
@@ -791,6 +880,7 @@ def main(cfg: DictConfig):
 
         # --- Run 1: Baseline (no intervention) ---
         print("\n[1/2] Running BASELINE test (no intervention)...")
+        baseline_transcripts_dir = transcripts_base / "baseline"
         baseline_results_df = run_ipi_test(
             wrapper=wrapper,
             questions_df=questions_df,
@@ -802,6 +892,7 @@ def main(cfg: DictConfig):
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
             option_scores=option_scores,
+            transcripts_dir=baseline_transcripts_dir,
         )
         baseline_pi_data = compute_polarization_index(baseline_results_df)
         baseline_metrics = baseline_pi_data['metrics']
@@ -815,6 +906,7 @@ def main(cfg: DictConfig):
 
         # --- Run 2: Intervention ---
         print("\n[2/2] Running INTERVENTION test...")
+        intervention_transcripts_dir = transcripts_base / "intervention"
         intervention_results_df = run_ipi_test(
             wrapper=wrapper,
             questions_df=questions_df,
@@ -826,6 +918,7 @@ def main(cfg: DictConfig):
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
             option_scores=option_scores,
+            transcripts_dir=intervention_transcripts_dir,
         )
         intervention_pi_data = compute_polarization_index(
             intervention_results_df)
@@ -938,6 +1031,12 @@ def main(cfg: DictConfig):
         comparison_artifact.add_file(intervention_saved['sentences_csv'])
         comparison_artifact.add_file(intervention_saved['pairs_csv'])
         comparison_artifact.add_file(intervention_saved['metrics_json'])
+        baseline_transcript_count = _attach_transcript_files_to_artifact(
+            comparison_artifact, baseline_transcripts_dir
+        )
+        intervention_transcript_count = _attach_transcript_files_to_artifact(
+            comparison_artifact, intervention_transcripts_dir
+        )
 
         # Add visualizations
         for name, path in viz_results['artifacts'].items():
@@ -945,7 +1044,18 @@ def main(cfg: DictConfig):
                 comparison_artifact.add_file(path)
 
         wandb.log_artifact(comparison_artifact)
+        wandb.summary.update({
+            "ipi_transcript_count_baseline": baseline_transcript_count,
+            "ipi_transcript_count_intervention": intervention_transcript_count,
+            "ipi_transcripts_dir_baseline": str(baseline_transcripts_dir),
+            "ipi_transcripts_dir_intervention": str(intervention_transcripts_dir),
+        })
         print(f"\nComparison artifact logged to W&B: {intervened_artifact_name}")
+        print(
+            "IPI transcripts logged to W&B: "
+            f"{baseline_transcript_count} baseline, "
+            f"{intervention_transcript_count} intervention .txt files"
+        )
 
         # Set return values for the function
         results_df = intervention_results_df
@@ -955,6 +1065,9 @@ def main(cfg: DictConfig):
     else:
         # --- Single run mode (baseline only, no comparison) ---
         print("\nRunning IPI evaluation...")
+        single_transcripts_dir = transcripts_base / (
+            experiment_name if experiment_name else "run"
+        )
         results_df = run_ipi_test(
             wrapper=wrapper,
             questions_df=questions_df,
@@ -966,6 +1079,7 @@ def main(cfg: DictConfig):
             intervention_scope=intervention_scope,
             last_k=intervention_last_k,
             option_scores=option_scores,
+            transcripts_dir=single_transcripts_dir,
         )
 
         # Compute Polarization Index
@@ -1025,6 +1139,9 @@ def main(cfg: DictConfig):
         print(f"  Sentences: {saved_files['sentences_csv']}")
         print(f"  Pairs: {saved_files['pairs_csv']}")
         print(f"  Metrics: {saved_files['metrics_json']}")
+        if single_transcripts_dir.is_dir():
+            n_txt = len(list(single_transcripts_dir.glob("*.txt")))
+            print(f"  IPI transcripts: {single_transcripts_dir} ({n_txt} .txt files)")
 
         # Log baseline artifact.
         artifacts_cfg = cfg.get("artifacts", {}) or {}
@@ -1048,9 +1165,17 @@ def main(cfg: DictConfig):
         ipi_artifact.add_file(saved_files['sentences_csv'])
         ipi_artifact.add_file(saved_files['pairs_csv'])
         ipi_artifact.add_file(saved_files['metrics_json'])
+        transcript_count = _attach_transcript_files_to_artifact(
+            ipi_artifact, single_transcripts_dir
+        )
 
         wandb.log_artifact(ipi_artifact)
         print(f"IPI results artifact logged: {artifact_name}")
+        if transcript_count:
+            print(
+                f"IPI transcripts logged to W&B: {transcript_count} .txt files "
+                f"under ipi_transcripts/"
+            )
 
         # Log summary metrics to W&B
         wandb.summary.update({
@@ -1062,6 +1187,8 @@ def main(cfg: DictConfig):
             'has_intervention': False,
             'ipi_eval_split': ipi_eval_split,
             'ipi_eval_dataset': questions_path,
+            'ipi_transcript_count': transcript_count,
+            'ipi_transcripts_dir': str(single_transcripts_dir),
         })
 
     # Finish W&B run

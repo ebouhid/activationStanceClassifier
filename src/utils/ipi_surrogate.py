@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 import random
 import torch
 import torch.nn.functional as F
 from typing import Any, Dict, List, Mapping, Optional
+
+_logger = logging.getLogger(__name__)
+_last_option_scores_log: dict[str, Any] | None = None
 
 from utils.intervention_hooks import (
     DEFAULT_LAST_K,
@@ -33,13 +37,93 @@ def option_scores_from_seed(seed: int) -> dict[str, int]:
     scores = list(SCORES_ORDERED)
     rng = random.Random(int(seed))
     rng.shuffle(scores)
-    return {letter: score for letter, score in zip(IPI_OPTION_LETTERS, scores)}
+    mapping = {letter: score for letter, score in zip(IPI_OPTION_LETTERS, scores)}
+    log_option_scores_mapping(
+        mapping,
+        source="option_scores_from_seed",
+        seed=int(seed),
+    )
+    return mapping
 
 
 def format_option_scores(option_scores: Mapping[str, int]) -> str:
     return ", ".join(
         f"{letter}={option_scores[letter]:+d}" for letter in IPI_OPTION_LETTERS
     )
+
+
+def option_scores_to_alternative_numbers(
+    option_scores: Mapping[str, int],
+) -> dict[int, int]:
+    """Map alternative index 1–5 (A–E) to IPI score."""
+    return {
+        alt: int(option_scores[letter])
+        for alt, letter in enumerate(IPI_OPTION_LETTERS, start=1)
+    }
+
+
+def format_option_scores_alternative(option_scores: Mapping[str, int]) -> str:
+    alt_map = option_scores_to_alternative_numbers(option_scores)
+    return ", ".join(f"{alt}={alt_map[alt]:+d}" for alt in sorted(alt_map))
+
+
+def build_option_scores_log_payload(
+    option_scores: Mapping[str, int],
+    *,
+    source: str,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    letter_map = {letter: int(option_scores[letter]) for letter in IPI_OPTION_LETTERS}
+    alt_map = option_scores_to_alternative_numbers(option_scores)
+    payload: dict[str, Any] = {
+        "option_scores_source": source,
+        "option_scores_letter": letter_map,
+        "option_scores_alternative": alt_map,
+        "option_scores_letter_str": format_option_scores(letter_map),
+        "option_scores_alternative_str": format_option_scores_alternative(letter_map),
+    }
+    if seed is not None:
+        payload["option_mapping_seed"] = int(seed)
+    return payload
+
+
+def log_option_scores_mapping(
+    option_scores: Mapping[str, int],
+    *,
+    source: str,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Log letter and alternative-number mappings (terminal + W&B when active)."""
+    global _last_option_scores_log
+    payload = build_option_scores_log_payload(
+        option_scores, source=source, seed=seed
+    )
+    _last_option_scores_log = payload
+    seed_part = f" (seed={seed})" if seed is not None else ""
+    message = (
+        f"IPI option scores [{source}]{seed_part}: "
+        f"letters: {payload['option_scores_letter_str']}; "
+        f"alternatives: {payload['option_scores_alternative_str']}"
+    )
+    print(message)
+    _logger.info(message)
+    flush_option_scores_wandb_log()
+    return payload
+
+
+def flush_option_scores_wandb_log() -> bool:
+    """Push the last option-score mapping to the active W&B run, if any."""
+    if _last_option_scores_log is None:
+        return False
+    try:
+        import wandb
+    except ImportError:
+        return False
+    if wandb.run is None:
+        return False
+    wandb.config.update(_last_option_scores_log, allow_val_change=True)
+    wandb.summary.update(_last_option_scores_log)
+    return True
 
 
 def seed_dependent_option_scores_enabled(cfg: Any) -> bool:
@@ -60,7 +144,9 @@ def resolve_option_mapping_seed(cfg: Any) -> int:
 def resolve_option_scores(cfg: Any) -> dict[str, int]:
     """Letter→score map for this Hydra config (canonical or seed-permuted)."""
     if not seed_dependent_option_scores_enabled(cfg):
-        return dict(IPI_OPTION_SCORES)
+        mapping = dict(IPI_OPTION_SCORES)
+        log_option_scores_mapping(mapping, source="resolve_option_scores")
+        return mapping
     return option_scores_from_seed(resolve_option_mapping_seed(cfg))
 
 

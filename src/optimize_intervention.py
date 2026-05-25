@@ -22,9 +22,8 @@ from ipi_eval import (
 )
 from utils.ipi_surrogate import (
     discover_option_token_ids,
-    format_option_scores,
+    flush_option_scores_wandb_log,
     resolve_option_scores,
-    resolve_option_mapping_seed,
     seed_dependent_option_scores_enabled,
 )
 from utils.experiment_ids import make_multiplier_artifact_name, scope_identity_suffix
@@ -686,14 +685,6 @@ def main(cfg: DictConfig):
         log_resolved_seeds(resolved, prefix="optimize_intervention")
         option_scores = resolve_option_scores(cfg)
         shuffle_option_scores = seed_dependent_option_scores_enabled(cfg)
-        option_mapping_seed = (
-            resolve_option_mapping_seed(cfg) if shuffle_option_scores else None
-        )
-        if shuffle_option_scores:
-            print(
-                f"Seed-dependent A–E mapping (option_mapping_seed={option_mapping_seed}): "
-                f"{format_option_scores(option_scores)}"
-            )
         seed = resolved.optimization
         fast_sample_seed = resolved.optimization_fast_sample
         split_seed = resolved.optimization_split
@@ -738,6 +729,7 @@ def main(cfg: DictConfig):
             job_type="optimization",
             config=wandb_config
         )
+        flush_option_scores_wandb_log()
 
         split_id = cfg.data.get('split_id', None)
         optimization_dataset = cfg.data.get('optimization_dataset')
