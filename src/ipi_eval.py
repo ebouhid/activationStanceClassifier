@@ -705,6 +705,7 @@ def main(cfg: DictConfig):
     Main function to run discrete IPI evaluation.
     """
     from utils.ipi_surrogate import (
+        _wandb_safe_option_scores_payload,
         build_option_scores_log_payload,
         resolve_option_mapping_seed,
         seed_dependent_option_scores_enabled,
@@ -763,7 +764,7 @@ def main(cfg: DictConfig):
                 else None
             ),
             'option_scores': dict(option_scores),
-            **option_scores_log,
+            **_wandb_safe_option_scores_payload(option_scores_log),
         }
     )
 

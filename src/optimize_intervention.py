@@ -883,13 +883,28 @@ def main(cfg: DictConfig):
             sample_prompt,
             option_scores=option_scores,
         )
-        print(f"\nA–E option token IDs ({language}):")
+        from utils.ipi_surrogate import score_to_letter_map
+
+        score_to_letter = score_to_letter_map(option_scores)
+        mapping_mode = (
+            "seed-dependent"
+            if shuffle_option_scores
+            else "canonical"
+        )
+        print(
+            f"\nA–E option token IDs ({language}, {mapping_mode}, "
+            f"ipi.seed={resolved.ipi}):"
+        )
         for score in sorted(option_token_ids):
+            letter = score_to_letter[score]
             decoded = [
                 wrapper.model.tokenizer.decode([tid])
                 for tid in option_token_ids[score]
             ]
-            print(f"  score {score:+d}: ids={option_token_ids[score]} -> {decoded}")
+            print(
+                f"  score {score:+d} (letter {letter}): "
+                f"ids={option_token_ids[score]} -> {decoded}"
+            )
 
         # Run baseline evaluation (discrete PI for final validation reference)
         baseline_scores, baseline_pi = run_baseline(

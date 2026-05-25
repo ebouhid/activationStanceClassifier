@@ -185,6 +185,17 @@ def log_option_scores_mapping(
     return payload
 
 
+def _wandb_safe_option_scores_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """W&B config/summary encoding requires string keys in nested dicts."""
+    safe: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            safe[key] = {str(k): v for k, v in value.items()}
+        else:
+            safe[key] = value
+    return safe
+
+
 def flush_option_scores_wandb_log() -> bool:
     """Push the last option-score mapping to the active W&B run, if any."""
     if _last_option_scores_log is None:
@@ -195,14 +206,39 @@ def flush_option_scores_wandb_log() -> bool:
         return False
     if wandb.run is None:
         return False
-    wandb.config.update(_last_option_scores_log, allow_val_change=True)
-    wandb.summary.update(_last_option_scores_log)
+    safe_payload = _wandb_safe_option_scores_payload(_last_option_scores_log)
+    wandb.config.update(safe_payload, allow_val_change=True)
+    wandb.summary.update(safe_payload)
     return True
 
 
+def merged_ipi_cfg(cfg: Any) -> dict[str, Any]:
+    """Resolve ``ipi`` with ``experiment.ipi`` overrides (Hydra experiment group)."""
+    from omegaconf import OmegaConf
+
+    merged: dict[str, Any] = {}
+    if hasattr(cfg, "get"):
+        base = cfg.get("ipi")
+        if base is not None:
+            merged.update(OmegaConf.to_container(base, resolve=True) or {})
+        experiment = cfg.get("experiment")
+        if experiment is not None:
+            exp_ipi = (
+                experiment.get("ipi")
+                if hasattr(experiment, "get")
+                else None
+            )
+            if exp_ipi is not None:
+                merged.update(
+                    OmegaConf.to_container(exp_ipi, resolve=True) or {}
+                )
+    return merged
+
+
 def seed_dependent_option_scores_enabled(cfg: Any) -> bool:
-    ipi_cfg = cfg.get("ipi", {}) if hasattr(cfg, "get") else {}
-    return bool(ipi_cfg.get("seed_dependent_option_scores", False))
+    return bool(
+        merged_ipi_cfg(cfg).get("seed_dependent_option_scores", False)
+    )
 
 
 def resolve_option_mapping_seed(cfg: Any) -> int:
@@ -217,7 +253,7 @@ def resolve_option_mapping_seed(cfg: Any) -> int:
 
 def resolve_option_scores(cfg: Any) -> dict[str, int]:
     """Letter→score map for this Hydra config (canonical or seed-shuffled letters)."""
-    ipi_cfg = cfg.get("ipi", {}) if hasattr(cfg, "get") else {}
+    ipi_cfg = merged_ipi_cfg(cfg)
     language = str(ipi_cfg.get("language", "pt"))
     if not seed_dependent_option_scores_enabled(cfg):
         mapping = dict(IPI_OPTION_SCORES)

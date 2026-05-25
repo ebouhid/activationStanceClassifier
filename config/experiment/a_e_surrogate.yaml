@@ -3,7 +3,9 @@ split_id: three_way_plus_holdout_v1
 seed: null
 runs_subdir: a_e_surrogate_altflip
 
-# Permute letter→score mapping by run seed (soft + discrete IPI stay aligned).
+# Merged into top-level ``ipi`` via merged_ipi_cfg() (Hydra nests this under
+# ``experiment.ipi``, not ``cfg.ipi``). Subprocess CLI also sets
+# ``ipi.seed_dependent_option_scores=true`` when this is enabled.
 ipi:
   seed_dependent_option_scores: true
 

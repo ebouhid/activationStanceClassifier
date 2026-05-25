@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
 """Hydra-driven pipeline planner (dry-run first pass)."""
@@ -42,6 +43,24 @@ def _trial_values_for_k(trial_grid: dict[str, Any], top_k: int) -> list[int]:
     return [int(v) for v in trial_grid[key]]
 
 
+def _experiment_cli_prefix(cfg: DictConfig) -> str:
+    """Hydra overrides so subprocesses see the same composed experiment config."""
+    try:
+        experiment_choice = HydraConfig.get().runtime.choices.get("experiment")
+    except Exception:
+        experiment_choice = None
+    parts: list[str] = []
+    if experiment_choice:
+        parts.append(f"experiment={experiment_choice}")
+    from utils.ipi_surrogate import seed_dependent_option_scores_enabled
+
+    if seed_dependent_option_scores_enabled(cfg):
+        parts.append("ipi.seed_dependent_option_scores=true")
+    if parts:
+        return " ".join(parts) + " "
+    return ""
+
+
 def _build_commands(
     model_cfg_name: str,
     direction: str,
@@ -53,6 +72,7 @@ def _build_commands(
     intervention_scope: str,
     intervention_last_k: int,
     resolved: ResolvedSeeds,
+    cfg: DictConfig,
 ) -> list[str]:
     """
     Compose stage commands with explicit Hydra overrides for every artifact
@@ -74,11 +94,13 @@ def _build_commands(
     feature_ranking_ref = f"{feature_ranking_name}:latest"
     multipliers_ref = f"{multipliers_name}:latest"
     seed_args = seed_cli_overrides(resolved)
+    experiment_prefix = _experiment_cli_prefix(cfg)
 
     cmds: list[str] = []
     if stages.get("extract_activations", False):
         cmds.append(
             "python src/extract_activations.py "
+            f"{experiment_prefix}"
             f"model={model_cfg_name} "
             f"artifacts.activations_name={activations_name} "
             f"{seed_args}"
@@ -86,6 +108,7 @@ def _build_commands(
     if stages.get("feature_selection", False):
         cmds.append(
             "python src/train_eval_svc.py "
+            f"{experiment_prefix}"
             f"model={model_cfg_name} "
             f"data.activations_artifact_name={activations_ref} "
             f"artifacts.feature_ranking_name={feature_ranking_name} "
@@ -94,6 +117,7 @@ def _build_commands(
     if stages.get("optimization", False):
         cmds.append(
             "python src/optimize_intervention.py "
+            f"{experiment_prefix}"
             f"model={model_cfg_name} "
             f"optimization.direction={direction} "
             f"optimization.top_k={top_k} "
@@ -107,6 +131,7 @@ def _build_commands(
     if stages.get("ipi_baseline", False) and include_baseline_ipi:
         cmds.append(
             "python src/ipi_eval.py "
+            f"{experiment_prefix}"
             f"model={model_cfg_name} ipi.condition=baseline "
             "ipi.multiplier_artifact_name=null "
             f"ipi.intervention_scope={intervention_scope} "
@@ -117,6 +142,7 @@ def _build_commands(
     if stages.get("ipi_intervened", False):
         cmds.append(
             "python src/ipi_eval.py "
+            f"{experiment_prefix}"
             f"model={model_cfg_name} ipi.condition=intervened "
             f"optimization.direction={direction} optimization.top_k={top_k} "
             f"optimization.n_trials={n_trials} "
@@ -128,7 +154,8 @@ def _build_commands(
         )
     if stages.get("poeta", False):
         cmds.append(
-            f"python src/poeta_evaluator.py model={model_cfg_name} {seed_args}"
+            f"python src/poeta_evaluator.py {experiment_prefix}"
+            f"model={model_cfg_name} {seed_args}"
         )
     return cmds
 
@@ -453,6 +480,7 @@ def main(cfg: DictConfig) -> None:
                                 intervention_scope=scope,
                                 intervention_last_k=intervention_last_k,
                                 resolved=resolved,
+                                cfg=cfg,
                             )
                             manifest = {
                                 "run_id": run_id,
