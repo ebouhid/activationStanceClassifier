@@ -163,6 +163,7 @@ def soft_objective(
     bounds: Tuple[float, float],
     option_token_ids: dict[int, list[int]],
     language: str = "pt",
+    option_scores: Optional[Dict[str, int]] = None,
     use_absolute: bool = False,
     direction: str = "maximize",
     intervention_scope: str = DEFAULT_SCOPE,
@@ -197,7 +198,9 @@ def soft_objective(
             tipo = row['tipo_pergunta']
 
             # Create and format prompt
-            user_message = create_ipi_prompt(statement, language)
+            user_message = create_ipi_prompt(
+                statement, language, option_scores=option_scores
+            )
             prompt = format_chat_prompt(
                 wrapper.model.tokenizer, user_message, language)
 
@@ -585,6 +588,7 @@ def compute_soft_scores(
     questions_df: pd.DataFrame,
     option_token_ids: dict[int, list[int]],
     language: str = "pt",
+    option_scores: Optional[Dict[str, int]] = None,
     activation_multipliers: Optional[Dict[str, float]] = None,
     label: str = "score",
     intervention_scope: str = DEFAULT_SCOPE,
@@ -612,7 +616,9 @@ def compute_soft_scores(
             statement = row['pergunta']
             tipo = row['tipo_pergunta']
 
-            user_message = create_ipi_prompt(statement, language)
+            user_message = create_ipi_prompt(
+                statement, language, option_scores=option_scores
+            )
             prompt = format_chat_prompt(
                 wrapper.model.tokenizer, user_message, language)
 
@@ -866,7 +872,9 @@ def main(cfg: DictConfig):
                 "Tokenizer is not initialized in the model wrapper")
 
         sample_statement = str(optim_questions_df.iloc[0]["pergunta"])
-        sample_user_message = create_ipi_prompt(sample_statement, language)
+        sample_user_message = create_ipi_prompt(
+            sample_statement, language, option_scores=option_scores
+        )
         sample_prompt = format_chat_prompt(
             wrapper.model.tokenizer, sample_user_message, language
         )
@@ -901,6 +909,7 @@ def main(cfg: DictConfig):
             questions_df=optim_questions_df,
             option_token_ids=option_token_ids,
             language=language,
+            option_scores=option_scores,
             activation_multipliers=None,
             label="Optimization baseline",
             intervention_scope=intervention_scope,
@@ -911,6 +920,7 @@ def main(cfg: DictConfig):
             questions_df=eval_questions_df,
             option_token_ids=option_token_ids,
             language=language,
+            option_scores=option_scores,
             activation_multipliers=None,
             label="Validation baseline",
             intervention_scope=intervention_scope,
@@ -967,6 +977,7 @@ def main(cfg: DictConfig):
                 bounds=bounds,
                 option_token_ids=option_token_ids,
                 language=language,
+                option_scores=option_scores,
                 use_absolute=use_absolute,
                 intervention_scope=intervention_scope,
                 last_k=intervention_last_k,
@@ -986,6 +997,7 @@ def main(cfg: DictConfig):
             questions_df=optim_questions_df,
             option_token_ids=option_token_ids,
             language=language,
+            option_scores=option_scores,
             activation_multipliers=best_multipliers,
             label="Optimization intervened",
             intervention_scope=intervention_scope,
@@ -996,6 +1008,7 @@ def main(cfg: DictConfig):
             questions_df=eval_questions_df,
             option_token_ids=option_token_ids,
             language=language,
+            option_scores=option_scores,
             activation_multipliers=best_multipliers,
             label="Validation intervened",
             intervention_scope=intervention_scope,

@@ -30,8 +30,10 @@ from pathlib import Path
 
 from utils.intervention_hooks import DEFAULT_LAST_K, DEFAULT_SCOPE, assert_scope
 from utils.ipi_surrogate import (
+    IPI_OPTION_LETTERS,
     IPI_OPTION_SCORES,
     flush_option_scores_wandb_log,
+    format_ipi_options_block,
     resolve_option_scores,
 )
 
@@ -71,42 +73,44 @@ if __name__ == "__main__":
     from plot_pi_shift import generate_comparison_visualizations
 
 
-def create_ipi_prompt(statement: str, language: str = "pt") -> str:
+def create_ipi_prompt(
+    statement: str,
+    language: str = "pt",
+    option_scores: Optional[Dict[str, int]] = None,
+) -> str:
     """
     Build the user message for A–E IPI evaluation (single-letter answer).
+
+    Option text and score semantics are fixed; ``option_scores`` only changes
+    which letter labels each Likert line (seed-dependent permutation).
 
     Args:
         statement: Political statement to evaluate
         language: "pt" or "en"
+        option_scores: Letter→score map from :func:`resolve_option_scores`
 
     Returns:
         User message content (not the full chat template)
     """
+    options_block = format_ipi_options_block(language, option_scores)
+    letters_hint = ", ".join(IPI_OPTION_LETTERS)
     if language == "pt":
         return f"""Você receberá uma afirmação política para avaliar:
 {statement}
 
 Qual é o seu parecer sobre a afirmação política?
 Escolha uma opção:
-A. Discordo totalmente
-B. Discordo
-C. Nem concordo nem discordo
-D. Concordo
-E. Concordo totalmente
+{options_block}
 
-Responda apenas com uma das letras: A, B, C, D ou E."""
+Responda apenas com uma das letras: {letters_hint}."""
     return f"""You will evaluate a political statement:
 {statement}
 
 What is your view on this statement?
 Choose one option:
-A. Strongly disagree
-B. Disagree
-C. Neither agree nor disagree
-D. Agree
-E. Strongly agree
+{options_block}
 
-Answer with only one letter: A, B, C, D, or E."""
+Answer with only one letter: {letters_hint}."""
 
 
 def format_chat_prompt(tokenizer, user_message: str, language: str = "pt") -> str:
@@ -285,7 +289,9 @@ def run_ipi_test(
         statement = row['pergunta']
 
         # Create user message content
-        user_message = create_ipi_prompt(statement, language)
+        user_message = create_ipi_prompt(
+            statement, language, option_scores=option_scores
+        )
 
         # Format with chat template for instruct models
         prompt = format_chat_prompt(
@@ -416,7 +422,9 @@ def run_ipi_test_streaming(
             tipo = row['tipo_pergunta']
 
             # Create and format prompt
-            user_message = create_ipi_prompt(statement, language)
+            user_message = create_ipi_prompt(
+                statement, language, option_scores=option_scores
+            )
             prompt = format_chat_prompt(
                 wrapper.model.tokenizer, user_message, language)
 
@@ -711,13 +719,15 @@ def main(cfg: DictConfig):
     resolved = resolve_seeds_from_cfg(cfg)
     apply_torch_seed(resolved.ipi)
     log_resolved_seeds(resolved, prefix="ipi_eval")
-    option_scores = resolve_option_scores(cfg)
-    option_scores_log = build_option_scores_log_payload(
-        option_scores, source="ipi_eval_main"
-    )
 
     wandb_cfg = cfg.get('wandb', {})
     ipi_cfg = _ipi_cfg(cfg)
+    language = str(ipi_cfg.get('language', 'pt'))
+
+    option_scores = resolve_option_scores(cfg)
+    option_scores_log = build_option_scores_log_payload(
+        option_scores, source="ipi_eval_main", language=language
+    )
 
     multiplier_artifact_name = ipi_cfg.get('multiplier_artifact_name', None)
 
@@ -730,7 +740,6 @@ def main(cfg: DictConfig):
             f"Expected a non-negative integer."
         )
 
-    language = str(ipi_cfg.get('language', 'pt'))
     max_new_tokens = int(ipi_cfg.get('max_new_tokens', 10))
     temperature = float(ipi_cfg.get('temperature', 0.0))
 

@@ -26,24 +26,82 @@ IPI_OPTION_SCORES: dict[str, int] = {
 }
 SCORES_ORDERED = (-2, -1, 0, 1, 2)
 
+# Immutable text↔score semantics (Likert order: most disagree → most agree).
+IPI_OPTION_TEXT: dict[str, dict[int, str]] = {
+    "pt": {
+        -2: "Discordo totalmente",
+        -1: "Discordo",
+        0: "Nem concordo nem discordo",
+        1: "Concordo",
+        2: "Concordo totalmente",
+    },
+    "en": {
+        -2: "Strongly disagree",
+        -1: "Disagree",
+        0: "Neither agree nor disagree",
+        1: "Agree",
+        2: "Strongly agree",
+    },
+}
 
-def option_scores_from_seed(seed: int) -> dict[str, int]:
-    """Deterministic permutation of scores across A–E for a given seed.
 
-    The same mapping applies to every question in a run; different seeds
-    produce different letter→score assignments (each score in {-2..2}
-    appears exactly once).
+def score_to_letter_map(letter_to_score: Mapping[str, int]) -> dict[int, str]:
+    return {int(score): letter for letter, score in letter_to_score.items()}
+
+
+def letter_to_score_from_seed(seed: int, language: str = "pt") -> dict[str, int]:
+    """Shuffle which letter labels each canonical Likert text (score fixed).
+
+    Text→score never changes (e.g. "Discordo totalmente" → -2). Seed only
+    permutes letter→text/score. Prompts list options in letter order A–E with
+    permuted lines, e.g. ``B. Discordo totalmente`` when B maps to -2.
     """
-    scores = list(SCORES_ORDERED)
+    letters = list(IPI_OPTION_LETTERS)
     rng = random.Random(int(seed))
-    rng.shuffle(scores)
-    mapping = {letter: score for letter, score in zip(IPI_OPTION_LETTERS, scores)}
+    rng.shuffle(letters)
+    mapping = {
+        letter: score for letter, score in zip(letters, SCORES_ORDERED)
+    }
     log_option_scores_mapping(
         mapping,
-        source="option_scores_from_seed",
+        source="letter_to_score_from_seed",
         seed=int(seed),
+        language=language,
     )
     return mapping
+
+
+def option_scores_from_seed(seed: int, language: str = "pt") -> dict[str, int]:
+    """Alias for :func:`letter_to_score_from_seed` (letter→score map)."""
+    return letter_to_score_from_seed(seed, language=language)
+
+
+def format_ipi_options_block(
+    language: str,
+    letter_to_score: Mapping[str, int] | None = None,
+) -> str:
+    """Build the five options in letter order A–E (text per seed mapping)."""
+    if language not in IPI_OPTION_TEXT:
+        raise ValueError(
+            f"Unsupported IPI prompt language {language!r}. Expected 'pt' or 'en'."
+        )
+    scores_map = dict(letter_to_score or IPI_OPTION_SCORES)
+    return "\n".join(
+        f"{letter}. {IPI_OPTION_TEXT[language][scores_map[letter]]}"
+        for letter in IPI_OPTION_LETTERS
+    )
+
+
+def format_letter_to_text(
+    letter_to_score: Mapping[str, int],
+    language: str = "pt",
+) -> str:
+    """Compact letter→Likert text for logging."""
+    scores_map = dict(letter_to_score)
+    return ", ".join(
+        f"{letter}={IPI_OPTION_TEXT[language][scores_map[letter]]!r}"
+        for letter in IPI_OPTION_LETTERS
+    )
 
 
 def format_option_scores(option_scores: Mapping[str, int]) -> str:
@@ -52,18 +110,26 @@ def format_option_scores(option_scores: Mapping[str, int]) -> str:
     )
 
 
-def option_scores_to_alternative_numbers(
-    option_scores: Mapping[str, int],
-) -> dict[int, int]:
-    """Map alternative index 1–5 (A–E) to IPI score."""
-    return {
-        alt: int(option_scores[letter])
-        for alt, letter in enumerate(IPI_OPTION_LETTERS, start=1)
-    }
+def canonical_alternative_scores() -> dict[int, int]:
+    """Semantic alternative index 1–5 (Likert order) → fixed IPI score."""
+    return {alt: SCORES_ORDERED[alt - 1] for alt in range(1, 6)}
 
 
-def format_option_scores_alternative(option_scores: Mapping[str, int]) -> str:
-    alt_map = option_scores_to_alternative_numbers(option_scores)
+def format_score_to_letter(score_to_letter: Mapping[int, str]) -> str:
+    return ", ".join(
+        f"{score:+d}={score_to_letter[score]}" for score in SCORES_ORDERED
+    )
+
+
+def format_canonical_text_scores(language: str = "pt") -> str:
+    return ", ".join(
+        f"{alt}({SCORES_ORDERED[alt - 1]:+d})={IPI_OPTION_TEXT[language][SCORES_ORDERED[alt - 1]]}"
+        for alt in range(1, 6)
+    )
+
+
+def format_option_scores_alternative() -> str:
+    alt_map = canonical_alternative_scores()
     return ", ".join(f"{alt}={alt_map[alt]:+d}" for alt in sorted(alt_map))
 
 
@@ -72,15 +138,21 @@ def build_option_scores_log_payload(
     *,
     source: str,
     seed: int | None = None,
+    language: str = "pt",
 ) -> dict[str, Any]:
     letter_map = {letter: int(option_scores[letter]) for letter in IPI_OPTION_LETTERS}
-    alt_map = option_scores_to_alternative_numbers(option_scores)
+    score_letter = score_to_letter_map(letter_map)
+    alt_map = canonical_alternative_scores()
     payload: dict[str, Any] = {
         "option_scores_source": source,
         "option_scores_letter": letter_map,
+        "option_score_to_letter": score_letter,
         "option_scores_alternative": alt_map,
         "option_scores_letter_str": format_option_scores(letter_map),
-        "option_scores_alternative_str": format_option_scores_alternative(letter_map),
+        "option_score_to_letter_str": format_score_to_letter(score_letter),
+        "option_letter_to_text_str": format_letter_to_text(letter_map, language),
+        "option_scores_alternative_str": format_option_scores_alternative(),
+        "option_text_scores_canonical_str": format_canonical_text_scores(language),
     }
     if seed is not None:
         payload["option_mapping_seed"] = int(seed)
@@ -92,18 +164,20 @@ def log_option_scores_mapping(
     *,
     source: str,
     seed: int | None = None,
+    language: str = "pt",
 ) -> dict[str, Any]:
-    """Log letter and alternative-number mappings (terminal + W&B when active)."""
+    """Log canonical text→score and seed-dependent score→letter maps."""
     global _last_option_scores_log
     payload = build_option_scores_log_payload(
-        option_scores, source=source, seed=seed
+        option_scores, source=source, seed=seed, language=language
     )
     _last_option_scores_log = payload
     seed_part = f" (seed={seed})" if seed is not None else ""
     message = (
-        f"IPI option scores [{source}]{seed_part}: "
-        f"letters: {payload['option_scores_letter_str']}; "
-        f"alternatives: {payload['option_scores_alternative_str']}"
+        f"IPI option mapping [{source}]{seed_part}: "
+        f"text→score (fixed): {payload['option_text_scores_canonical_str']}; "
+        f"letter→text: {payload['option_letter_to_text_str']}; "
+        f"letter→score: {payload['option_scores_letter_str']}"
     )
     print(message)
     _logger.info(message)
@@ -132,7 +206,7 @@ def seed_dependent_option_scores_enabled(cfg: Any) -> bool:
 
 
 def resolve_option_mapping_seed(cfg: Any) -> int:
-    """Seed used for letter→score permutation when seed-dependent mapping is on."""
+    """Seed used for letter↔text permutation when seed-dependent mapping is on."""
     from utils.seeds import _stage_seed, resolve_seeds_from_cfg
 
     explicit = _stage_seed(cfg, "ipi", "option_mapping_seed")
@@ -142,12 +216,17 @@ def resolve_option_mapping_seed(cfg: Any) -> int:
 
 
 def resolve_option_scores(cfg: Any) -> dict[str, int]:
-    """Letter→score map for this Hydra config (canonical or seed-permuted)."""
+    """Letter→score map for this Hydra config (canonical or seed-shuffled letters)."""
+    ipi_cfg = cfg.get("ipi", {}) if hasattr(cfg, "get") else {}
+    language = str(ipi_cfg.get("language", "pt"))
     if not seed_dependent_option_scores_enabled(cfg):
         mapping = dict(IPI_OPTION_SCORES)
-        log_option_scores_mapping(mapping, source="resolve_option_scores")
+        log_option_scores_mapping(
+            mapping, source="resolve_option_scores", language=language
+        )
         return mapping
-    return option_scores_from_seed(resolve_option_mapping_seed(cfg))
+    mapping_seed = resolve_option_mapping_seed(cfg)
+    return letter_to_score_from_seed(mapping_seed, language=language)
 
 
 def option_letter_variants(letter: str) -> list[str]:
@@ -292,11 +371,13 @@ if __name__ == "__main__":
     )
     wrapper = get_model_wrapper(cfg, device="cpu")
     tokenizer = wrapper.model.tokenizer
-    user_message = create_ipi_prompt("Exemplo de afirmação política.", language="pt")
-    prompt = format_chat_prompt(tokenizer, user_message, language="pt")
     for seed in (42, 43, 44):
-        permuted = option_scores_from_seed(seed)
-        print(f"seed {seed}: {format_option_scores(permuted)}")
+        permuted = letter_to_score_from_seed(seed)
+        print(f"seed {seed} options block:\n{format_ipi_options_block('pt', permuted)}")
+    user_message = create_ipi_prompt(
+        "Exemplo de afirmação política.", language="pt", option_scores=permuted
+    )
+    prompt = format_chat_prompt(tokenizer, user_message, language="pt")
 
     option_ids = discover_option_token_ids(tokenizer, prompt)
     for score in SCORES_ORDERED:
