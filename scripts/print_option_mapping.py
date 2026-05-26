@@ -8,6 +8,8 @@ Examples:
     python scripts/print_option_mapping.py 42 150
     python scripts/print_option_mapping.py --canonical 42
     python scripts/print_option_mapping.py --language en 0 1 2
+    python scripts/print_option_mapping.py --find-canonical
+    python scripts/print_option_mapping.py --find-canonical --start 0 --end 5000 --limit 5
 """
 
 from __future__ import annotations
@@ -34,6 +36,24 @@ def letter_to_score_for_seed(seed: int) -> dict[str, int]:
     rng = random.Random(int(seed))
     rng.shuffle(letters)
     return {letter: int(score) for letter, score in zip(letters, SCORES_ORDERED)}
+
+
+def is_canonical_seed(seed: int) -> bool:
+    """True when shuffle leaves A=-2 … E=+2 (same as ``IPI_OPTION_SCORES``)."""
+    return letter_to_score_for_seed(seed) == dict(IPI_OPTION_SCORES)
+
+
+def find_canonical_seeds(start: int, end: int, limit: int | None) -> list[int]:
+    """Return seeds in ``[start, end)`` whose mapping is canonical."""
+    if start >= end:
+        raise ValueError(f"start must be < end (got {start} >= {end})")
+    found: list[int] = []
+    for seed in range(int(start), int(end)):
+        if is_canonical_seed(seed):
+            found.append(seed)
+            if limit is not None and len(found) >= limit:
+                break
+    return found
 
 
 def format_mapping_block(
@@ -69,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "seeds",
-        nargs="+",
+        nargs="*",
         type=str,
         help="Seeds (space- or comma-separated), e.g. 42 150 or 42,150",
     )
@@ -85,10 +105,72 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Also print the canonical mapping (A=-2 … E=+2, no shuffle)",
     )
+    parser.add_argument(
+        "--find-canonical",
+        action="store_true",
+        help="Search for seed(s) whose shuffle yields the canonical A=-2 … E=+2 layout",
+    )
+    parser.add_argument(
+        "--start",
+        type=int,
+        default=0,
+        help="Inclusive start of seed search with --find-canonical (default: 0)",
+    )
+    parser.add_argument(
+        "--end",
+        type=int,
+        default=100_000,
+        help="Exclusive end of seed search with --find-canonical (default: 100000)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Stop after N canonical seeds when searching (default: 1; use 0 for all in range)",
+    )
     args = parser.parse_args(argv)
 
     if args.language not in IPI_OPTION_TEXT:
         parser.error(f"unsupported language {args.language!r}")
+
+    if args.find_canonical:
+        if args.seeds:
+            seed_list = parse_seeds(args.seeds)
+            canonical = [s for s in seed_list if is_canonical_seed(s)]
+            print(
+                f"checked {len(seed_list)} seed(s); "
+                f"{len(canonical)} canonical (A=-2 … E=+2)"
+            )
+            if not canonical:
+                return 1
+            for seed in canonical:
+                print(f"  seed={seed}")
+            return 0
+
+        limit = None if args.limit == 0 else max(args.limit, 0)
+        try:
+            canonical = find_canonical_seeds(args.start, args.end, limit)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if not canonical:
+            print(
+                f"no canonical seed in [{args.start}, {args.end}) "
+                f"(A=-2 … E=+2 layout)"
+            )
+            return 1
+        print(
+            f"canonical seed(s) in [{args.start}, {args.end}) "
+            f"(A=-2 … E=+2 layout):"
+        )
+        for seed in canonical:
+            print(f"  seed={seed}")
+        if limit is not None and len(canonical) == limit:
+            print(f"(stopped after --limit {args.limit})")
+        return 0
+
+    if not args.seeds:
+        parser.error("provide at least one seed, or use --find-canonical")
 
     seed_list = parse_seeds(args.seeds)
 
