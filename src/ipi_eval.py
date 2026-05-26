@@ -230,12 +230,22 @@ def save_ipi_prompt_answer_txt(
 def _attach_transcript_files_to_artifact(
     artifact: wandb.Artifact,
     transcripts_dir: Optional[Path],
+    *,
+    artifact_subdir: Optional[str] = None,
 ) -> int:
+    """Attach .txt transcripts under ipi_transcripts/ in the W&B artifact.
+
+    When logging baseline and intervention into one artifact, pass distinct
+    ``artifact_subdir`` values (e.g. ``baseline``, ``intervention``) so
+    identical per-question filenames do not collide in the manifest.
+    """
     if transcripts_dir is None or not transcripts_dir.is_dir():
         return 0
+    sub = (artifact_subdir or "").strip("/")
+    prefix = f"ipi_transcripts/{sub}/" if sub else "ipi_transcripts/"
     count = 0
     for txt_path in sorted(transcripts_dir.glob("*.txt")):
-        artifact.add_file(str(txt_path), name=f"ipi_transcripts/{txt_path.name}")
+        artifact.add_file(str(txt_path), name=f"{prefix}{txt_path.name}")
         count += 1
     return count
 
@@ -1042,10 +1052,14 @@ def main(cfg: DictConfig):
         comparison_artifact.add_file(intervention_saved['pairs_csv'])
         comparison_artifact.add_file(intervention_saved['metrics_json'])
         baseline_transcript_count = _attach_transcript_files_to_artifact(
-            comparison_artifact, baseline_transcripts_dir
+            comparison_artifact,
+            baseline_transcripts_dir,
+            artifact_subdir="baseline",
         )
         intervention_transcript_count = _attach_transcript_files_to_artifact(
-            comparison_artifact, intervention_transcripts_dir
+            comparison_artifact,
+            intervention_transcripts_dir,
+            artifact_subdir="intervention",
         )
 
         # Add visualizations

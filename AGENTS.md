@@ -1335,6 +1335,8 @@ Record implementation decisions here.
 
 | Date | Decision | Rationale | Files affected |
 |---|---|---|---|
+| 2026-05-25 | Namespace comparative IPI transcripts in W&B as `ipi_transcripts/baseline/` and `ipi_transcripts/intervention/` | Baseline and intervention share per-question `.txt` names; flat `ipi_transcripts/{name}` caused `ValueError: Cannot add the same path twice` on comparison artifact upload | `src/ipi_eval.py` |
+| 2026-05-25 | Define `option_mapping_seed` in `optimize_intervention.py` via `resolve_option_mapping_seed(cfg)` when `ipi.seed_dependent_option_scores` is on (else `None`) | Artifact metadata referenced an undefined name after soft metrics completed, crashing W&B upload with `NameError` | `src/optimize_intervention.py` |
 | 2026-05-24 | IPI eval saves per-question prompt/answer `.txt` under `ipi_transcripts/` and attaches them to W&B evaluation artifacts; `resolve_option_scores` / `option_scores_from_seed` log letter + alternative (1–5) mappings to terminal and W&B (flush after `wandb.init`) | Auditable prompts/responses and reproducible A–E score maps without manual copying | `src/ipi_eval.py`, `src/utils/ipi_surrogate.py`, `src/optimize_intervention.py` |
 | 2026-05-24 | Seed-dependent **letter→text** mapping; text→score fixed; prompts list A–E in letter order with permuted Likert lines via `format_ipi_options_block` | Display in score order was wrong UX; user wants e.g. `B. Discordo totalmente` when B↔-2 for that seed | `src/utils/ipi_surrogate.py`, `ipi_eval.py`, `optimize_intervention.py` |
 | 2026-05-22 | Optional seed-dependent letter↔text permutation (`ipi.seed_dependent_option_scores`) | Same mapping for all questions in a run; soft surrogate + discrete IPI share `resolve_option_scores(cfg)`; default off preserves canonical A=-2…E=+2 | `src/utils/ipi_surrogate.py`, `ipi_eval.py`, `optimize_intervention.py`, `config/config.yaml`, `config/experiment/a_e_surrogate.yaml` |
@@ -1385,7 +1387,8 @@ Track unresolved questions here.
 ## Last Successful Command
 
 ```bash
-python -m py_compile src/run_pipeline.py src/backfill_manifests.py src/utils/metrics_backfill.py src/likert_scale_test.py
+python -m py_compile src/optimize_intervention.py
+# Post-fix: a_e_surrogate multirun reached artifact metadata (seeds 42, 52, 62, 72, 643)
 ```
 
 ---

@@ -23,6 +23,7 @@ from ipi_eval import (
 from utils.ipi_surrogate import (
     discover_option_token_ids,
     flush_option_scores_wandb_log,
+    resolve_option_mapping_seed,
     resolve_option_scores,
     seed_dependent_option_scores_enabled,
 )
@@ -691,6 +692,11 @@ def main(cfg: DictConfig):
         log_resolved_seeds(resolved, prefix="optimize_intervention")
         option_scores = resolve_option_scores(cfg)
         shuffle_option_scores = seed_dependent_option_scores_enabled(cfg)
+        option_mapping_seed = (
+            resolve_option_mapping_seed(cfg)
+            if shuffle_option_scores
+            else None
+        )
         seed = resolved.optimization
         fast_sample_seed = resolved.optimization_fast_sample
         split_seed = resolved.optimization_split
