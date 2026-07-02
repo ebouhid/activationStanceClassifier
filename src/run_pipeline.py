@@ -29,6 +29,7 @@ from utils.seeds import (
     resolve_seeds_from_cfg,
     resolved_seeds_to_dict,
     seed_cli_overrides,
+    seed_sweep_values,
 )
 
 
@@ -43,6 +44,23 @@ def _trial_values_for_k(trial_grid: dict[str, Any], top_k: int) -> list[int]:
     return [int(v) for v in trial_grid[key]]
 
 
+def _surrogate_enabled(cfg: DictConfig) -> bool:
+    """Resolve the seed-dependent option-score flag for the composed run.
+
+    The experiment-level field wins when present; otherwise fall back to the
+    top-level ``ipi`` block (so ``ipi.seed_dependent_option_scores=true`` on the
+    run_pipeline CLI still works without an experiment config)."""
+    experiment = cfg.get("experiment") if hasattr(cfg, "get") else None
+    if experiment is not None and hasattr(experiment, "get"):
+        value = experiment.get("seed_dependent_option_scores")
+        if value is not None:
+            return bool(value)
+    ipi = cfg.get("ipi") if hasattr(cfg, "get") else None
+    if ipi is not None and hasattr(ipi, "get"):
+        return bool(ipi.get("seed_dependent_option_scores", False))
+    return False
+
+
 def _experiment_cli_prefix(cfg: DictConfig) -> str:
     """Hydra overrides so subprocesses see the same composed experiment config."""
     try:
@@ -52,13 +70,11 @@ def _experiment_cli_prefix(cfg: DictConfig) -> str:
     parts: list[str] = []
     if experiment_choice:
         parts.append(f"experiment={experiment_choice}")
-    from utils.ipi_surrogate import seed_dependent_option_scores_enabled
-
-    if seed_dependent_option_scores_enabled(cfg):
-        parts.append("ipi.seed_dependent_option_scores=true")
-    if parts:
-        return " ".join(parts) + " "
-    return ""
+    # Thread the resolved flag explicitly so subprocesses read it from top-level
+    # ``cfg.ipi`` without needing to merge the experiment namespace themselves.
+    enabled = "true" if _surrogate_enabled(cfg) else "false"
+    parts.append(f"ipi.seed_dependent_option_scores={enabled}")
+    return " ".join(parts) + " "
 
 
 def _build_commands(
@@ -323,68 +339,38 @@ def _baseline_reuse_key(
     )
 
 
-@hydra.main(version_base=None, config_path="../config", config_name="config")
-def main(cfg: DictConfig) -> None:
-    if cfg.get("experiment") is None:
-        raise ValueError(
-            "Missing required experiment config. Example: experiment=k80_trials"
-        )
+def _plan_matrix_for_seed(
+    *,
+    cfg: DictConfig,
+    experiment: DictConfig,
+    resolved: ResolvedSeeds,
+    split_id: str,
+    scopes: list[str],
+    intervention_last_k: int,
+    ranking_top_n: int,
+    layers: str,
+    trial_grid: dict[str, Any],
+    output_root: Path,
+    dry_run: bool,
+    project_root: Path,
+    wandb_project: str | None,
+    wandb_entity: str | None,
+    resume: bool,
+    force: bool,
+    skip_existing: bool,
+    scheduled_baseline_keys: set[tuple[Any, ...]],
+    counters: dict[str, int],
+) -> None:
+    """Plan (and optionally execute) the model x direction x top_k x n_trials x
+    scope matrix for one fully-resolved seed.
 
-    experiment = cfg.experiment
-    split_id = str(experiment.split_id)
-    resolved = resolve_seeds_from_cfg(cfg)
+    Everything seed-specific arrives via ``resolved``; the function is otherwise
+    identical to the legacy single-seed body. Shared mutable state
+    (``scheduled_baseline_keys`` for baseline reuse and ``counters`` for the
+    plan summary) is threaded in so it accumulates across seed iterations.
+    """
     optimization_seed = resolved.optimization
     baseline_seed = resolved.ipi
-    data_cfg = cfg.get("data", {}) or {}
-    if not data_cfg.get("validation_dataset"):
-        raise ValueError("data.validation_dataset must be set for pipeline planning.")
-    ranking_top_n = int(cfg.feature_selection.get("ranking_top_n", 256))
-    extraction_cfg = cfg.get("extraction", {})
-    layers_cfg = extraction_cfg.get("layers", "all")
-    layers = "all" if isinstance(layers_cfg, str) else str(list(layers_cfg))
-
-    # Intervention scope axis. Missing `scopes` field means single-scope sweep
-    # at the legacy default, which keeps existing experiment yamls
-    # (k80_trials, small_k_trials) bit-identical on disk.
-    scopes_cfg = experiment.get("scopes", None)
-    if scopes_cfg is None:
-        scopes = [DEFAULT_SCOPE]
-    else:
-        scopes = [str(s) for s in scopes_cfg]
-    for scope in scopes:
-        assert_scope(scope)
-    intervention_last_k = int(experiment.get("intervention_last_k", DEFAULT_LAST_K))
-    if intervention_last_k < 0:
-        raise ValueError(
-            f"experiment.intervention_last_k must be >= 0, got {intervention_last_k!r}."
-        )
-
-    runs_subdir = _resolve_runs_subdir(experiment, cfg.get("pipeline"))
-    output_root = Path("runs") / runs_subdir
-    output_root.mkdir(parents=True, exist_ok=True)
-    dry_run = bool(cfg.pipeline.get("dry_run", True))
-    project_root = Path(hydra.utils.get_original_cwd())
-
-    wandb_cfg = cfg.get("wandb", {}) or {}
-    wandb_project = wandb_cfg.get("project")
-    wandb_entity = wandb_cfg.get("entity")
-
-    print("=" * 70)
-    print(f"PIPELINE PLAN: {experiment.name}")
-    print(f"runs_subdir={runs_subdir} (manifests under {output_root}/)")
-    print(f"dry_run={dry_run}")
-    print(f"resume={cfg.pipeline.get('resume', True)} force={cfg.pipeline.get('force', False)}")
-    print(f"skip_existing={cfg.pipeline.get('skip_existing', True)}")
-    print("=" * 70)
-
-    trial_grid = dict(experiment.trial_grid)
-    job_count = 0
-    skipped_count = 0
-    failed_count = 0
-    resume = bool(cfg.pipeline.get("resume", True))
-    force = bool(cfg.pipeline.get("force", False))
-    skip_existing = bool(cfg.pipeline.get("skip_existing", True))
-    scheduled_baseline_keys: set[tuple[Any, ...]] = set()
 
     for model_cfg_name in experiment.models:
         model_cfg_name = str(model_cfg_name)
@@ -420,7 +406,7 @@ def main(cfg: DictConfig) -> None:
                         include_baseline_ipi = baseline_key not in scheduled_baseline_keys
 
                         if _should_skip_existing(previous_status, resume, force, skip_existing):
-                            skipped_count += 1
+                            counters["skipped"] += 1
                             print(f"\n[skip] {run_id} (already completed; resume/skip_existing active)")
                             continue
 
@@ -501,8 +487,8 @@ def main(cfg: DictConfig) -> None:
                             }
                             _write_manifest(manifest_path, manifest)
 
-                            job_count += 1
-                            print(f"\n[{job_count}] {run_id}")
+                            counters["planned"] += 1
+                            print(f"\n[{counters['planned']}] {run_id}")
                             log_resolved_seeds(resolved, prefix=f"[plan] {run_id}")
                             if previous_status and force:
                                 print(f"  forced replan over previous status={previous_status}")
@@ -525,7 +511,7 @@ def main(cfg: DictConfig) -> None:
                                 )
                                 print("  execution: completed")
                         except Exception as exc:
-                            failed_count += 1
+                            counters["failed"] += 1
                             failed_manifest = {
                                 "run_id": run_id,
                                 "status": "failed",
@@ -548,10 +534,109 @@ def main(cfg: DictConfig) -> None:
                             print(f"  error: {exc}")
                             print(f"  manifest: {manifest_path}")
 
+
+@hydra.main(version_base=None, config_path="../config", config_name="config")
+def main(cfg: DictConfig) -> None:
+    if cfg.get("experiment") is None:
+        raise ValueError(
+            "Missing required experiment config. Example: experiment=k80_trials"
+        )
+
+    experiment = cfg.experiment
+    split_id = str(experiment.split_id)
+    # Optional multi-seed axis. `[None]` means "no sweep" -> a single run using
+    # the standard (non-overridden) seed resolution, identical to legacy behavior.
+    seed_values = seed_sweep_values(cfg)
+    data_cfg = cfg.get("data", {}) or {}
+    if not data_cfg.get("validation_dataset"):
+        raise ValueError("data.validation_dataset must be set for pipeline planning.")
+    ranking_top_n = int(cfg.feature_selection.get("ranking_top_n", 256))
+    extraction_cfg = cfg.get("extraction", {})
+    layers_cfg = extraction_cfg.get("layers", "all")
+    layers = "all" if isinstance(layers_cfg, str) else str(list(layers_cfg))
+
+    # Intervention scope axis. Missing `scopes` field means single-scope sweep
+    # at the legacy default, which keeps existing experiment yamls
+    # (k80_trials, small_k_trials) bit-identical on disk.
+    scopes_cfg = experiment.get("scopes", None)
+    if scopes_cfg is None:
+        scopes = [DEFAULT_SCOPE]
+    else:
+        scopes = [str(s) for s in scopes_cfg]
+    for scope in scopes:
+        assert_scope(scope)
+    intervention_last_k = int(experiment.get("intervention_last_k", DEFAULT_LAST_K))
+    if intervention_last_k < 0:
+        raise ValueError(
+            f"experiment.intervention_last_k must be >= 0, got {intervention_last_k!r}."
+        )
+
+    runs_subdir = _resolve_runs_subdir(experiment, cfg.get("pipeline"))
+    output_root = Path("runs") / runs_subdir
+    output_root.mkdir(parents=True, exist_ok=True)
+    dry_run = bool(cfg.pipeline.get("dry_run", True))
+    project_root = Path(hydra.utils.get_original_cwd())
+
+    wandb_cfg = cfg.get("wandb", {}) or {}
+    wandb_project = wandb_cfg.get("project")
+    wandb_entity = wandb_cfg.get("entity")
+
+    seed_sweep_display = (
+        "default (no sweep)"
+        if seed_values == [None]
+        else ", ".join(str(s) for s in seed_values)
+    )
+
+    print("=" * 70)
+    print(f"PIPELINE PLAN: {experiment.name}")
+    print(f"runs_subdir={runs_subdir} (manifests under {output_root}/)")
+    print(f"seed sweep: {seed_sweep_display}")
+    print(f"dry_run={dry_run}")
+    print(f"resume={cfg.pipeline.get('resume', True)} force={cfg.pipeline.get('force', False)}")
+    print(f"skip_existing={cfg.pipeline.get('skip_existing', True)}")
+    print("=" * 70)
+
+    trial_grid = dict(experiment.trial_grid)
+    counters: dict[str, int] = {"planned": 0, "skipped": 0, "failed": 0}
+    resume = bool(cfg.pipeline.get("resume", True))
+    force = bool(cfg.pipeline.get("force", False))
+    skip_existing = bool(cfg.pipeline.get("skip_existing", True))
+    # Shared across seeds: the baseline-reuse key already encodes the ipi seed,
+    # so distinct seeds get distinct baselines while same-seed jobs still reuse.
+    scheduled_baseline_keys: set[tuple[Any, ...]] = set()
+
+    for seed_override in seed_values:
+        resolved = resolve_seeds_from_cfg(cfg, seed_override)
+        if seed_override is not None:
+            print(f"\n{'-' * 70}")
+            print(f"SEED SWEEP: optimization seed = {resolved.optimization}")
+            print(f"{'-' * 70}")
+        _plan_matrix_for_seed(
+            cfg=cfg,
+            experiment=experiment,
+            resolved=resolved,
+            split_id=split_id,
+            scopes=scopes,
+            intervention_last_k=intervention_last_k,
+            ranking_top_n=ranking_top_n,
+            layers=layers,
+            trial_grid=trial_grid,
+            output_root=output_root,
+            dry_run=dry_run,
+            project_root=project_root,
+            wandb_project=wandb_project,
+            wandb_entity=wandb_entity,
+            resume=resume,
+            force=force,
+            skip_existing=skip_existing,
+            scheduled_baseline_keys=scheduled_baseline_keys,
+            counters=counters,
+        )
+
     print("\n" + "=" * 70)
-    print(f"Planned jobs: {job_count}")
-    print(f"Skipped jobs: {skipped_count}")
-    print(f"Failed jobs: {failed_count}")
+    print(f"Planned jobs: {counters['planned']}")
+    print(f"Skipped jobs: {counters['skipped']}")
+    print(f"Failed jobs: {counters['failed']}")
     print(f"Manifests written under: {output_root}")
     print("=" * 70)
 

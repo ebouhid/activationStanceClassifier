@@ -1,32 +1,28 @@
-name: surrogate_validation_ae_likert
+name: surrogate_validation_ae_likert_multiseed
 split_id: three_way_plus_holdout_v1
-seed: null
-runs_subdir: a_e_surrogate_altflip
-
-# Merged into top-level ``ipi`` via merged_ipi_cfg() (Hydra nests this under
-# ``experiment.ipi``, not ``cfg.ipi``). Subprocess CLI also sets
-# ``ipi.seed_dependent_option_scores=true`` when this is enabled.
-ipi:
-  seed_dependent_option_scores: true
+# Seeds to run. run_pipeline.py runs the full matrix once per seed (each value
+# replaces the global seed for that run). Use a one-element list for a single
+# run. Can also be passed on the CLI: `experiment.seeds=[42,43,44]`.
+# seeds: [10, 20, 30, 42]
+seeds: [42]
+runs_subdir: a_e_surrogate_multiseed
 
 models:
   - gemma-3-4b
+  - qwen-3-8b
+  # - llama-3.1-8b
+  # - phi-3
 
 directions:
   - minimize
-  # - maximize
+  - maximize
 
-# Keep this focused. K=32 is the previous stable candidate;
-# K=96 is the current strongest validation candidate for maximization.
 feature_counts:
-  # - 32
   - 96
 
 trial_grid:
-  # "32": [2000]
   "96": [2000]
 
-# Keep scope fixed to isolate the effect of the surrogate.
 scopes:
   - prompt_all
 

@@ -47,27 +47,42 @@ def global_seed_from_cfg(cfg: DictConfig | Mapping[str, Any]) -> int:
     )
 
 
-def experiment_seed_from_cfg(cfg: DictConfig | Mapping[str, Any]) -> int | None:
+def seed_sweep_values(cfg: DictConfig | Mapping[str, Any]) -> list[int | None]:
+    """Return the list of seed overrides to sweep over.
+
+    Reads the ``experiment.seeds`` list, the single source of truth for which
+    seeds the pipeline runs (use a one-element list for a single run). The list
+    of ints is de-duplicated while preserving order. When the field is absent or
+    empty the function returns ``[None]``, a single sentinel meaning "use the
+    config's global seed" — so callers that simply iterate stay backward
+    compatible and pass ``None`` to ``resolve_seeds_from_cfg``.
+    """
     experiment = cfg.get("experiment") if hasattr(cfg, "get") else None
     if experiment is None or _is_null(experiment):
-        return None
-    if isinstance(experiment, DictConfig):
-        return _coerce_optional_int(experiment.get("seed"))
-    if isinstance(experiment, Mapping):
-        return _coerce_optional_int(experiment.get("seed"))
-    return None
+        return [None]
+    raw = experiment.get("seeds") if hasattr(experiment, "get") else None
+    if _is_null(raw):
+        return [None]
+    if OmegaConf.is_config(raw):
+        raw = OmegaConf.to_container(raw, resolve=True)
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(
+            f"experiment.seeds must be a list of ints when set, got {raw!r}."
+        )
+    seen: set[int] = set()
+    values: list[int | None] = []
+    for item in raw:
+        value = int(item)
+        if value not in seen:
+            seen.add(value)
+            values.append(value)
+    return values or [None]
 
 
-def resolve_seed(
-    global_seed: int,
-    experiment_seed: int | None,
-    stage_seed: int | None,
-) -> int:
-    """Standard three-tier resolution: stage → experiment → global."""
+def resolve_seed(global_seed: int, stage_seed: int | None) -> int:
+    """Two-tier resolution: explicit stage seed wins, else the global seed."""
     if stage_seed is not None:
         return int(stage_seed)
-    if experiment_seed is not None:
-        return int(experiment_seed)
     return int(global_seed)
 
 
@@ -92,7 +107,6 @@ def _stage_seed(cfg: DictConfig, *keys: str) -> int | None:
 @dataclass(frozen=True)
 class ResolvedSeeds:
     global_seed: int
-    experiment_seed: int | None
     training: int
     feature_selection: int
     extraction: int
@@ -103,29 +117,38 @@ class ResolvedSeeds:
     poeta: int
 
 
-def resolve_seeds_from_cfg(cfg: DictConfig) -> ResolvedSeeds:
-    """Resolve every registered process seed from a composed Hydra config."""
-    global_seed = global_seed_from_cfg(cfg)
-    exp_seed = experiment_seed_from_cfg(cfg)
+def resolve_seeds_from_cfg(
+    cfg: DictConfig, seed_override: int | None = None
+) -> ResolvedSeeds:
+    """Resolve every registered process seed from a composed Hydra config.
+
+    When ``seed_override`` is provided it replaces the canonical global seed for
+    this resolution. This is how the pipeline runner threads a single value from
+    the ``experiment.seeds`` sweep without mutating the config: the override
+    becomes the base that every otherwise-unset stage inherits, and it is also
+    what gets threaded to subprocesses as the top-level ``seed=`` override.
+    Explicit stage-level seeds still take precedence. ``seed_override=None``
+    falls back to the config's global seed.
+    """
+    if seed_override is not None:
+        global_seed = int(seed_override)
+    else:
+        global_seed = global_seed_from_cfg(cfg)
 
     training = resolve_seed(
         global_seed,
-        exp_seed,
         _stage_seed(cfg, "training", "random_state"),
     )
     feature_selection = resolve_seed(
         global_seed,
-        exp_seed,
         _stage_seed(cfg, "feature_selection", "seed"),
     )
     extraction = resolve_seed(
         global_seed,
-        exp_seed,
         _stage_seed(cfg, "extraction", "seed"),
     )
     optimization = resolve_seed(
         global_seed,
-        exp_seed,
         _stage_seed(cfg, "optimization", "seed"),
     )
     optimization_fast_sample = resolve_nested_seed(
@@ -134,15 +157,13 @@ def resolve_seeds_from_cfg(cfg: DictConfig) -> ResolvedSeeds:
     )
     optimization_split = resolve_seed(
         global_seed,
-        exp_seed,
         _stage_seed(cfg, "optimization", "split_seed"),
     )
-    ipi = resolve_seed(global_seed, exp_seed, _stage_seed(cfg, "ipi", "seed"))
-    poeta = resolve_seed(global_seed, exp_seed, _stage_seed(cfg, "poeta", "seed"))
+    ipi = resolve_seed(global_seed, _stage_seed(cfg, "ipi", "seed"))
+    poeta = resolve_seed(global_seed, _stage_seed(cfg, "poeta", "seed"))
 
     return ResolvedSeeds(
         global_seed=global_seed,
-        experiment_seed=exp_seed,
         training=training,
         feature_selection=feature_selection,
         extraction=extraction,
@@ -158,7 +179,6 @@ def resolved_seeds_to_dict(resolved: ResolvedSeeds) -> dict[str, int | None]:
     """Audit map for manifests and W&B (resolved ints, not raw YAML nulls)."""
     return {
         "global": resolved.global_seed,
-        "experiment": resolved.experiment_seed,
         "training": resolved.training,
         "feature_selection": resolved.feature_selection,
         "extraction": resolved.extraction,
@@ -206,16 +226,14 @@ def apply_torch_seed(seed: int, deterministic: bool = True) -> None:
 
 
 def __main__() -> None:
-    assert resolve_seed(42, None, None) == 42
-    assert resolve_seed(42, 43, None) == 43
-    assert resolve_seed(42, 43, 99) == 99
+    assert resolve_seed(42, None) == 42
+    assert resolve_seed(42, 99) == 99
     assert resolve_nested_seed(99, None) == 99
     assert resolve_nested_seed(99, 7) == 7
 
     cfg = OmegaConf.create(
         {
             "seed": 42,
-            "experiment": {"seed": None},
             "training": {"random_state": None},
             "feature_selection": {"seed": None},
             "extraction": {"seed": None},
@@ -242,6 +260,13 @@ def __main__() -> None:
     )
     resolved_fast = resolve_seeds_from_cfg(cfg_fast)
     assert resolved_fast.optimization_fast_sample == 7
+
+    assert seed_sweep_values(cfg) == [None]
+    cfg_sweep = OmegaConf.merge(cfg, {"experiment": {"seeds": [42, 43, 43, 7]}})
+    assert seed_sweep_values(cfg_sweep) == [42, 43, 7]
+    assert resolve_seeds_from_cfg(cfg, seed_override=7).optimization == 7
+    # Explicit stage seed still wins over a sweep override.
+    assert resolve_seeds_from_cfg(cfg_opt, seed_override=7).optimization == 99
 
     print("seeds.py smoke test: OK")
     log_resolved_seeds(resolved_fast, prefix="[smoke]")

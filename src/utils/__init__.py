@@ -10,6 +10,7 @@ from utils.seeds import (
     resolve_seeds_from_cfg,
     resolved_seeds_to_dict,
     seed_cli_overrides,
+    seed_sweep_values,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "resolve_seeds_from_cfg",
     "resolved_seeds_to_dict",
     "seed_cli_overrides",
+    "seed_sweep_values",
 ]

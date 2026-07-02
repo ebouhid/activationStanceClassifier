@@ -140,7 +140,8 @@ Add or normalize these fields in the Hydra config tree.
 ### Centralized seeds (`src/utils/seeds.py`, branch `feat/centralize-seeds`)
 
 - **Global:** `seed: 42` (only non-null default in base config).
-- **Per-process overrides:** default `null`; resolved as `stage → experiment.seed → global`.
+- **Per-process overrides:** default `null`; resolved two-tier as `stage → global`.
+- **Multi-seed sweep:** `experiment.seeds: [..]` (single source of truth; one-element list = single run). `run_pipeline.py` runs the full matrix once per seed, each value replacing the global seed for that run via `resolve_seeds_from_cfg(cfg, seed_override=<seed>)`. The legacy singular `experiment.seed` field and the experiment resolution tier were removed.
 - **Nested:** `optimization.fast_sample_seed: null` inherits resolved `optimization.seed`.
 - **Pipeline:** subprocess commands receive explicit seed CLI overrides; manifest has `seed` (optimization) and `seeds` audit map.
 
@@ -1335,6 +1336,9 @@ Record implementation decisions here.
 
 | Date | Decision | Rationale | Files affected |
 |---|---|---|---|
+| 2026-06-24 | Add multi-seed sweeps via `experiment.seeds` list; drop the singular `experiment.seed` field and the experiment resolution tier (now two-tier `stage → global`). `run_pipeline.py` loops seeds, each replacing the global seed through `resolve_seeds_from_cfg(cfg, seed_override=...)`; the matrix body is extracted into `_plan_matrix_for_seed` | One canonical way to specify seeds (one-element list = single run); the swept value drives the top-level `seed=` threaded to every subprocess, so nothing stays anchored to the old global | `src/utils/seeds.py`, `src/utils/__init__.py`, `src/run_pipeline.py`, `config/experiment/*.yaml` |
+| 2026-06-24 | Remove `merged_ipi_cfg`; experiment surrogate toggle is a flat `experiment.seed_dependent_option_scores` field threaded by `run_pipeline.py` as an explicit top-level `ipi.seed_dependent_option_scores=<bool>` override | Eliminates the experiment-namespace merge workaround (and the "double" `ipi.seed_dependent_option_scores`); subprocesses read top-level `cfg.ipi` directly since the orchestrator always threads the resolved boolean | `src/utils/ipi_surrogate.py`, `src/run_pipeline.py`, `config/experiment/a_e_surrogate.yaml` |
+| 2026-06-10 | Add `question_score_variance.py` for baseline per-question mean/var across option-mapping seeds (no W&B) | Audits seed-dependent A–E mapping sensitivity with variance-ranked plot (`score_scale`: `alternative` 1–5 or `ipi` −2..2) | `src/question_score_variance.py` |
 | 2026-05-25 | Namespace comparative IPI transcripts in W&B as `ipi_transcripts/baseline/` and `ipi_transcripts/intervention/` | Baseline and intervention share per-question `.txt` names; flat `ipi_transcripts/{name}` caused `ValueError: Cannot add the same path twice` on comparison artifact upload | `src/ipi_eval.py` |
 | 2026-05-25 | Define `option_mapping_seed` in `optimize_intervention.py` via `resolve_option_mapping_seed(cfg)` when `ipi.seed_dependent_option_scores` is on (else `None`) | Artifact metadata referenced an undefined name after soft metrics completed, crashing W&B upload with `NameError` | `src/optimize_intervention.py` |
 | 2026-05-24 | IPI eval saves per-question prompt/answer `.txt` under `ipi_transcripts/` and attaches them to W&B evaluation artifacts; `resolve_option_scores` / `option_scores_from_seed` log letter + alternative (1–5) mappings to terminal and W&B (flush after `wandb.init`) | Auditable prompts/responses and reproducible A–E score maps without manual copying | `src/ipi_eval.py`, `src/utils/ipi_surrogate.py`, `src/optimize_intervention.py` |
@@ -1387,8 +1391,7 @@ Track unresolved questions here.
 ## Last Successful Command
 
 ```bash
-python -m py_compile src/optimize_intervention.py
-# Post-fix: a_e_surrogate multirun reached artifact metadata (seeds 42, 52, 62, 72, 643)
+python -m py_compile src/question_score_variance.py
 ```
 
 ---

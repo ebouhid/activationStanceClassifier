@@ -43,6 +43,9 @@ ipi:
   condition: baseline
   eval_split: validation
   multiplier_artifact_name: null
+  # When true, permute A–E -> {-2..2} deterministically from option_mapping_seed
+  # (or resolved ipi seed). Same mapping for all questions in a run.
+  seed_dependent_option_scores: false
   option_mapping_seed: null
   prompt_template_version: ae_options_v1
   parser_version: ae_options_v1
@@ -89,6 +92,17 @@ artifacts:
   multiplier_name: null
   ipi_baseline_name: null
   ipi_intervened_name: null
+
+# Baseline question-score variance sweeps (see config/experiment/qvar_*.yaml).
+# seed_mode shortnames: conv | order | joint
+question_score_variance:
+  seed_mode: joint
+  fixed_runtime_seed: 1
+  option_mapping_seeds: null
+  questions_csv: null
+  score_scale: alternative
+  max_questions: null
+  output_dir: runs/question_score_variance
 
 pipeline:
   dry_run: false

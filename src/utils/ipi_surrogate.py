@@ -212,33 +212,20 @@ def flush_option_scores_wandb_log() -> bool:
     return True
 
 
-def merged_ipi_cfg(cfg: Any) -> dict[str, Any]:
-    """Resolve ``ipi`` with ``experiment.ipi`` overrides (Hydra experiment group)."""
+def _ipi_cfg(cfg: Any) -> dict[str, Any]:
+    """Top-level ``ipi`` block as a plain dict (experiment overrides are threaded
+    explicitly by the pipeline orchestrator, so no cross-namespace merge needed)."""
     from omegaconf import OmegaConf
 
-    merged: dict[str, Any] = {}
     if hasattr(cfg, "get"):
         base = cfg.get("ipi")
         if base is not None:
-            merged.update(OmegaConf.to_container(base, resolve=True) or {})
-        experiment = cfg.get("experiment")
-        if experiment is not None:
-            exp_ipi = (
-                experiment.get("ipi")
-                if hasattr(experiment, "get")
-                else None
-            )
-            if exp_ipi is not None:
-                merged.update(
-                    OmegaConf.to_container(exp_ipi, resolve=True) or {}
-                )
-    return merged
+            return OmegaConf.to_container(base, resolve=True) or {}
+    return {}
 
 
 def seed_dependent_option_scores_enabled(cfg: Any) -> bool:
-    return bool(
-        merged_ipi_cfg(cfg).get("seed_dependent_option_scores", False)
-    )
+    return bool(_ipi_cfg(cfg).get("seed_dependent_option_scores", False))
 
 
 def resolve_option_mapping_seed(cfg: Any) -> int:
@@ -253,7 +240,7 @@ def resolve_option_mapping_seed(cfg: Any) -> int:
 
 def resolve_option_scores(cfg: Any) -> dict[str, int]:
     """Letter→score map for this Hydra config (canonical or seed-shuffled letters)."""
-    ipi_cfg = merged_ipi_cfg(cfg)
+    ipi_cfg = _ipi_cfg(cfg)
     language = str(ipi_cfg.get("language", "pt"))
     if not seed_dependent_option_scores_enabled(cfg):
         mapping = dict(IPI_OPTION_SCORES)
